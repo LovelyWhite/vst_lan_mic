@@ -1,0 +1,141 @@
+#pragma once
+
+#include "Protocol.h"
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+
+namespace sos {
+// One producer and one consumer. Only the consumer may discard queued data.
+template <typename T, uint32_t Capacity>
+class SpscRing {
+public:
+    static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of two");
+#if !defined(ARDUINO_ARCH_ESP32)
+    // Keep DAW callbacks lock-free. ESP32 permits the SDK's atomic fallback:
+    // is_always_lock_free == false does not invalidate acquire/release semantics.
+    static_assert(std::atomic<uint32_t>::is_always_lock_free, "Lock-free counters required");
+#endif
+    uint32_t size() const {
+        const auto r = read_.load(std::memory_order_acquire);
+        return write_.load(std::memory_order_acquire) - r;
+    }
+    bool push(const T* data, uint32_t count) {
+        const auto w = write_.load(std::memory_order_relaxed);
+        if (count > Capacity - (w - read_.load(std::memory_order_acquire))) return false;
+        for (uint32_t i = 0; i < count; ++i) data_[(w + i) & (Capacity - 1)] = data[i];
+        write_.store(w + count, std::memory_order_release);
+        return true;
+    }
+    bool pop(T& result) {
+        const auto r = read_.load(std::memory_order_relaxed);
+        if (r == write_.load(std::memory_order_acquire)) return false;
+        result = data_[r & (Capacity - 1)];
+        read_.store(r + 1, std::memory_order_release);
+        return true;
+    }
+    void discard(uint32_t count) {
+        const auto r = read_.load(std::memory_order_relaxed);
+        count = std::min(count, write_.load(std::memory_order_acquire) - r);
+        read_.store(r + count, std::memory_order_release);
+    }
+    void clear() { discard(Capacity); }
+private:
+    std::array<T, Capacity> data_{};
+    std::atomic<uint32_t> read_{0}, write_{0};
+};
+
+inline int16_t pcm16(float value) {
+    if (!std::isfinite(value)) return 0;
+    return int16_t(std::max(-32768.0f, std::min(32767.0f, value * 32768.0f)));
+}
+
+// Run on the network thread. Reject duplicates/late packets, conceal short gaps.
+class SequenceTracker {
+public:
+    void reset() { valid_ = false; }
+    template <typename Sink>
+    bool accept(uint32_t seq, const Frame& frame, Sink&& sink) {
+        if (valid_) {
+            const uint32_t delta = seq - next_;
+            if (delta >= 0x80000000u) return false;
+            if (delta > 0) {
+                lost += delta;
+                Frame silence{};
+                for (uint32_t i = 0; i < std::min(delta, uint32_t(3)); ++i) sink(silence);
+            }
+        }
+        next_ = seq + 1;
+        valid_ = true;
+        sink(frame);
+        return true;
+    }
+    uint32_t lost = 0;
+private:
+    bool valid_ = false;
+    uint32_t next_ = 0;
+};
+
+// Consumer-side elastic playout. A small continuous rate correction compensates
+// independent USB/DAW clocks; hard trimming bounds latency after a long stall.
+class Playout {
+public:
+    static constexpr uint32_t target = 3 * kFrameSamples;
+    SpscRing<int16_t, 8192> queue;
+    std::atomic<uint32_t> underruns{0}, trims{0}, overflows{0};
+
+    void push(const Frame& frame) {
+        if (!queue.push(frame.data(), uint32_t(frame.size()))) ++overflows;
+    }
+    void reset() {
+        queue.clear();
+        primed_ = false;
+        phase_ = 0;
+        previous_ = 0;
+        fade_ = 0;
+    }
+    void prepare() {
+        const auto size = queue.size();
+        if (size > target + 4 * kFrameSamples) {
+            queue.discard(size - target);
+            primed_ = false;
+            ++trims;
+        }
+        const float desired = 1.0f + std::max(-0.002f, std::min(0.002f,
+            (float(queue.size()) - float(target)) * 0.000002f));
+        ratio_ += (desired - ratio_) * 0.02f;
+    }
+    float next() {
+        if (!primed_) {
+            if (queue.size() < target) {
+                previous_ = std::abs(previous_) < 0.000001f ? 0.0f : previous_ * 0.98f;
+                return previous_;
+            }
+            queue.pop(a_); queue.pop(b_);
+            phase_ = 0;
+            primed_ = true;
+            fade_ = 0;
+        }
+        float out = (float(a_) + (float(b_) - float(a_)) * phase_) / 32768.0f;
+        fade_ = std::min(1.0f, fade_ + 1.0f / 96.0f);
+        out *= fade_;
+        phase_ += ratio_;
+        while (phase_ >= 1.0f) {
+            phase_ -= 1.0f;
+            a_ = b_;
+            if (!queue.pop(b_)) {
+                primed_ = false;
+                ++underruns;
+                break;
+            }
+        }
+        previous_ = out;
+        return out;
+    }
+private:
+    bool primed_ = false;
+    int16_t a_ = 0, b_ = 0;
+    float phase_ = 0, ratio_ = 1;
+    float previous_ = 0, fade_ = 0;
+};
+} // namespace sos
