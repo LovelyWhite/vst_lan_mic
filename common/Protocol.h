@@ -6,19 +6,28 @@
 
 namespace sos {
 constexpr uint32_t kMagic = 0x31534f53;
-constexpr uint8_t kVersion = 3;
+constexpr uint8_t kVersion = 6;
 constexpr uint16_t kDiscoveryPort = 45678;
 constexpr uint16_t kUplinkPort = 45679;
 constexpr uint32_t kSampleRate = 48000;
-constexpr size_t kFrameSamples = 240;
+// Fourteen USB milliseconds per packet reduce packet pressure while keeping
+// the complete IPv4 datagram below the 1500-byte Ethernet/Wi-Fi MTU.
+constexpr size_t kFrameSamples = 672;
+constexpr uint32_t kFrameDurationMs = 14;
+constexpr size_t kOpusFrameSamples = 960;
+constexpr uint32_t kOpusFrameDurationMs = 20;
+constexpr int kOpusBitrate = 192000;
+constexpr size_t kOpusMaxBytes = 512;
 constexpr size_t kHeaderSize = 28;
 constexpr size_t kFrameBytes = kFrameSamples * 2;
 constexpr size_t kMaxPacketSize = kHeaderSize + kFrameBytes;
 constexpr uint32_t kLeaseMs = 3500;
-constexpr uint32_t kAudioTimeoutMs = 250;
+constexpr uint32_t kAudioTimeoutMs = 500;
 constexpr const char* kDeviceName = "vst_lan_mic";
 
-enum class Kind : uint8_t { Discover = 1, Offer, Subscribe, Ack, Audio };
+enum class Kind : uint8_t {
+    Discover = 1, Offer = 2, Subscribe = 3, Ack = 4, Audio = 5, AudioOpus = 6
+};
 enum Role : uint16_t { Sender = 1, Receiver = 2, Busy = 0x8000 };
 
 inline uint16_t get16(const uint8_t* p) {
@@ -61,7 +70,7 @@ inline bool decode(const uint8_t* p, size_t size, Header& h) {
     if (size < kHeaderSize || size > kMaxPacketSize ||
         get32(p) != kMagic || p[4] != kVersion ||
         get32(p + 20) != kSampleRate || get16(p + 26) != 0 ||
-        p[5] < uint8_t(Kind::Discover) || p[5] > uint8_t(Kind::Audio))
+        p[5] < uint8_t(Kind::Discover) || p[5] > uint8_t(Kind::AudioOpus))
         return false;
     h = {Kind(p[5]), get16(p + 6), get32(p + 8), get32(p + 12),
          get32(p + 16), get16(p + 24)};
@@ -69,6 +78,9 @@ inline bool decode(const uint8_t* p, size_t size, Header& h) {
     switch (h.kind) {
         case Kind::Audio:
             return h.flags == 0 && h.session != 0 && h.payloadBytes == kFrameBytes;
+        case Kind::AudioOpus:
+            return h.flags == 0 && h.session != 0 &&
+                   h.payloadBytes > 0 && h.payloadBytes <= kOpusMaxBytes;
         case Kind::Offer:
             return h.flags == 0 && h.session != 0 &&
                    h.payloadBytes > 0 && h.payloadBytes <= 64;
@@ -85,6 +97,7 @@ inline bool decode(const uint8_t* p, size_t size, Header& h) {
 }
 
 using Frame = std::array<int16_t, kFrameSamples>;
+using OpusFrame = std::array<int16_t, kOpusFrameSamples>;
 inline void encodePcm(uint8_t* p, const Frame& frame) {
     for (size_t i = 0; i < frame.size(); ++i)
         put16(p + i * 2, uint16_t(frame[i]));

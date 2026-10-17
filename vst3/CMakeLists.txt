@@ -18,6 +18,15 @@ else()
     FetchContent_MakeAvailable(JUCE)
 endif()
 
+set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(opus
+    GIT_REPOSITORY https://github.com/xiph/opus.git
+    GIT_TAG v1.6.1
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(opus)
+
 # Install the built bundles into the DAW plugin directory after every build.
 # The default destination comes from JUCE: ~/Library/Audio/Plug-Ins/VST3 on
 # macOS and C:/Program Files/Common Files/VST3 on Windows.
@@ -56,7 +65,7 @@ function(add_bridge_plugin target code sending)
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0)
     target_link_libraries(${target} PRIVATE
-        juce::juce_audio_processors juce::juce_gui_extra
+        juce::juce_audio_processors juce::juce_gui_extra opus
         PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 endfunction()
 

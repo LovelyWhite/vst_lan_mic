@@ -9,7 +9,7 @@ import time
 # Wire format is specified by common/Protocol.h and docs/PROTOCOL.md.
 HEADER = struct.Struct("<IBBHIIIIHH")
 MAGIC = 0x31534F53
-VERSION = 3
+VERSION = 6
 PORT = 45678
 
 

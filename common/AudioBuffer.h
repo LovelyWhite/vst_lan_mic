@@ -53,7 +53,7 @@ inline int16_t pcm16(float value) {
 // Run on the network thread. Reject duplicates/late packets, conceal short gaps.
 class SequenceTracker {
 public:
-    void reset() { valid_ = false; }
+    void reset() { valid_ = false; lastSample_ = 0; }
     template <typename Sink>
     bool accept(uint32_t seq, const Frame& frame, Sink&& sink) {
         if (valid_) {
@@ -61,27 +61,63 @@ public:
             if (delta >= 0x80000000u) return false;
             if (delta > 0) {
                 lost += delta;
-                Frame silence{};
-                for (uint32_t i = 0; i < std::min(delta, uint32_t(3)); ++i) sink(silence);
+                maxGap = std::max(maxGap, delta);
+                constexpr uint32_t concealFramesMax =
+                    (300 + kFrameDurationMs - 1) / kFrameDurationMs;
+                const uint32_t concealFrames = std::min(delta, concealFramesMax);
+                Frame scratch{};
+                for (size_t i = 0; i < scratch.size(); ++i)
+                    scratch[i] = int16_t(float(lastSample_) *
+                        (1.0f - float(i + 1) / float(scratch.size())));
+                sink(scratch);
+                scratch.fill(0);
+                for (uint32_t i = 1; i < concealFrames; ++i) sink(scratch);
+
+                // Resume from silence without a full-scale discontinuity.
+                for (size_t i = 0; i < scratch.size(); ++i)
+                    scratch[i] = int16_t(float(frame[i]) *
+                        (float(i + 1) / float(scratch.size())));
+                next_ = seq + 1;
+                lastSample_ = frame.back();
+                sink(scratch);
+                return true;
             }
         }
         next_ = seq + 1;
         valid_ = true;
+        lastSample_ = frame.back();
         sink(frame);
         return true;
     }
-    uint32_t lost = 0;
+    uint32_t lost = 0, maxGap = 0;
 private:
     bool valid_ = false;
     uint32_t next_ = 0;
+    int16_t lastSample_ = 0;
 };
 
 // Consumer-side elastic playout. A small continuous rate correction compensates
 // independent USB/DAW clocks; hard trimming bounds latency after a long stall.
 class Playout {
 public:
-    static constexpr uint32_t target = 3 * kFrameSamples;
-    SpscRing<int16_t, 8192> queue;
+#if defined(ARDUINO_ARCH_ESP32)
+    // Opus keeps the Wi-Fi/lwIP load low enough to restore the full stability
+    // buffer while retaining more than 100 KB of measured internal heap.
+    static constexpr size_t queueCapacity = 32768;
+    static constexpr uint32_t targetMs = 300;
+    static constexpr float maxRateCorrection = 0.002f;
+#else
+    static constexpr size_t queueCapacity = 32768;
+    static constexpr uint32_t targetMs = 300;
+    static constexpr float maxRateCorrection = 0.002f;
+#endif
+    // Keep targets in milliseconds when the protocol frame duration changes.
+    static constexpr uint32_t targetFrames =
+        (targetMs + kFrameDurationMs - 1) / kFrameDurationMs;
+    static constexpr uint32_t target = targetFrames * kFrameSamples;
+    static constexpr uint32_t trimMargin = queueCapacity - target - kFrameSamples;
+    static_assert(target + kFrameSamples < queueCapacity, "Playout queue is too small");
+    SpscRing<int16_t, queueCapacity> queue;
     std::atomic<uint32_t> underruns{0}, trims{0}, overflows{0};
 
     void push(const Frame& frame) {
@@ -96,13 +132,14 @@ public:
     }
     void prepare() {
         const auto size = queue.size();
-        if (size > target + 4 * kFrameSamples) {
+        if (size > target + trimMargin) {
             queue.discard(size - target);
             primed_ = false;
             ++trims;
         }
-        const float desired = 1.0f + std::max(-0.002f, std::min(0.002f,
-            (float(queue.size()) - float(target)) * 0.000002f));
+        const float desired = 1.0f + std::max(-maxRateCorrection,
+            std::min(maxRateCorrection,
+                (float(queue.size()) - float(target)) * 0.000002f));
         ratio_ += (desired - ratio_) * 0.02f;
     }
     float next() {

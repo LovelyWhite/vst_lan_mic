@@ -10,6 +10,7 @@
             "includePath": [
                 "/Users/lw/work/vst_lan_mic/esp32s3/include",
                 "/Users/lw/work/vst_lan_mic/esp32s3/src",
+                "/Users/lw/work/vst_lan_mic/esp32s3/.pio/libdeps/esp32-s3-devkitc-1/libopus/src",
                 "/Users/lw/work/vst_lan_mic/esp32s3/.pio/libdeps/esp32-s3-devkitc-1/audio-tools/src",
                 "/Users/lw/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                 "/Users/lw/.platformio/packages/framework-arduinoespressif32/libraries/Network/src",
@@ -459,6 +460,7 @@
                 "path": [
                     "/Users/lw/work/vst_lan_mic/esp32s3/include",
                     "/Users/lw/work/vst_lan_mic/esp32s3/src",
+                    "/Users/lw/work/vst_lan_mic/esp32s3/.pio/libdeps/esp32-s3-devkitc-1/libopus/src",
                     "/Users/lw/work/vst_lan_mic/esp32s3/.pio/libdeps/esp32-s3-devkitc-1/audio-tools/src",
                     "/Users/lw/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                     "/Users/lw/.platformio/packages/framework-arduinoespressif32/libraries/Network/src",
@@ -912,6 +914,7 @@
                 "ARDUINO_USB_MODE=0",
                 "ARDUINO_USB_CDC_ON_BOOT=0",
                 "BOARD_HAS_PSRAM",
+                "CORE_DEBUG_LEVEL=0",
                 "CJSON_CIRCULAR_LIMIT=10000",
                 "CJSON_NESTING_LIMIT=1000",
                 "ESP32_ARDUINO_LIB_BUILDER",

@@ -39,8 +39,10 @@ DAW -> vst2esp -> Wi-Fi UDP -> ESP32-S3 -> USB IN -> 手机麦克风
 DAW <- esp2vst <- Wi-Fi UDP <- ESP32-S3 <- USB OUT <- 手机播放
 ```
 
-- 固定 48 kHz / PCM16，网络单声道，USB 双通道；立体声输入取左右平均，输出复制到左右。
-- 5 ms 音频包，15 ms 起播缓冲；小幅速率校正补偿两台设备的时钟差。
+- 固定 48 kHz，网络单声道，USB PCM16 双通道；立体声输入取左右平均，输出复制到左右。
+- 电脑到 ESP32 使用 14 ms PCM；ESP32 到电脑使用 20 ms、192 kbps CBR Opus。
+  两个网络接收方向均使用约 308 ms 起播缓冲；
+  小幅速率校正补偿两台设备的时钟差。
 - 独立网络线程、原子同步有界队列（电脑端要求无锁）、丢包补静音、欠载淡出、延迟积累裁剪。
 - 广播发现，单播订阅与音频传输；每个插件使用系统分配的本地端口，不抢占固定电脑端口。
 - 每台 ESP32 同时接受一个发送插件和一个接收插件，两个方向可以独立使用。
@@ -78,10 +80,14 @@ pio device monitor -d esp32s3 -b 115200
 当前 `platform = espressif32` 使用本机安装的平台；本次编译日志为平台 55.3.312、
 Arduino 3.3.12、ESP-IDF 5.5.5。音频库固定为
 `arduino-audio-tools@27547291d4a1514e64d37a97f1ce34636af86bd6`。
+下行压缩库固定为 `codec-opus@v1.6.1`，编码器状态放在 PSRAM，避免占用
+Wi-Fi/lwIP 所需的内部 RAM。
 平台未锁定版本，其他机器的解析结果可能不同，应核对构建日志。
 首次构建需要下载依赖。Arduino 3.3.12 使用原生 `AUDIO` 接口槽；
 较早的 Arduino 2/3 版本保留 `CUSTOM` 接口槽适配。
 音频库自带类驱动，因此**不要额外启用 `CFG_TUD_AUDIO` 或原生 USB CDC**。
+USB IN 使用库的包长控制，在 48 kHz 下每 1 ms 发送 192 字节；描述符仍保留
+196 字节最大包容量，不能将最大容量误当作固定有效包长。
 升级框架或音频库之前，需要重新检查这层适配，不能直接替换成任意版本。
 
 ESP32 工具链可能报告 `std::atomic<uint32_t>::is_always_lock_free == false`。
@@ -94,7 +100,8 @@ ESP32 工具链可能报告 `std::atomic<uint32_t>::is_always_lock_free == false
 
 ### 3. VST3 插件
 
-依赖 CMake 3.22+、Ninja、C++17 编译器。默认固定 JUCE 8.0.6，首次配置需要联网。
+依赖 CMake 3.22+、Ninja、C++17 编译器。默认固定 JUCE 8.0.6，并通过 CMake
+获取官方 Xiph Opus 1.6.1；首次配置需要联网。
 macOS 使用 Xcode Command Line Tools；Windows 使用 Visual Studio 2022 C++ 工具链。
 Windows 上应从 VS 开发者环境启动 VS Code，或通过 CMake Tools 选择 MSVC 工具链。
 
@@ -166,7 +173,7 @@ python3 python/discover.py --seconds 5 --broadcast 192.168.1.255
 - 固件提供 **UAC2**，不是 UAC1。不同 Android 系统、iOS 版本、转接器和应用对双通道 USB 麦克风的支持不同，当前没有实测通过的机型清单。
 - 系统枚举成功不代表所有通话、直播或录音应用都会采用该输入；应用可能强制使用内置麦克风或单声道。
 - USB 音量/静音控制未启用软件处理，音量请通过插件 `Network gain` 或手机应用调整。
-- 仅可信局域网使用：发现、控制、PCM 均为未认证、未加密 UDP。不要映射端口到公网。
+- 仅可信局域网使用：发现、控制、PCM 和 Opus 均为未认证、未加密 UDP。不要映射端口到公网。
 - 关闭 AP 客户端隔离；允许 DAW 的本地网络访问及防火墙 UDP 通信。VPN、多网卡或访客网络可能影响广播。
 - USB VID/PID 沿用音频库的开发默认值，不代表拥有商业产品 USB 标识授权。
 - 分发前确认 JUCE、音频库及相关依赖的许可证义务。
