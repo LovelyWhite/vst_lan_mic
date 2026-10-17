@@ -8,9 +8,6 @@ juce::AudioProcessorValueTreeState::ParameterLayout BridgeProcessor::makeParamet
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"gain", 1}, "Network gain (dB)",
         juce::NormalisableRange<float>{-60.0f, 12.0f, 0.1f}, 0.0f));
-    if constexpr (sending)
-        layout.add(std::make_unique<juce::AudioParameterBool>(
-            juce::ParameterID{"monitor", 1}, "Local pass-through", true));
     return layout;
 }
 
@@ -18,10 +15,9 @@ BridgeProcessor::BridgeProcessor()
     : AudioProcessor(BusesProperties()
           .withInput("Input", juce::AudioChannelSet::stereo(), true)
           .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
-      parameters(*this, nullptr, "StudioOneStream", makeParameters()) {
+      parameters(*this, nullptr, "SUXITECH LAN MIC", makeParameters()) {
     gainParam_ = parameters.getRawParameterValue("gain");
     enabledParam_ = parameters.getRawParameterValue("enabled");
-    if constexpr (sending) monitorParam_ = parameters.getRawParameterValue("monitor");
     parameters.addParameterListener("enabled", this);
 }
 
@@ -35,6 +31,43 @@ void BridgeProcessor::parameterChanged(const juce::String&, float value) {
     if (value < 0.5f) network.setEnabled(false);
 }
 
+void BridgeProcessor::resetSendResampler() {
+    pendingSamples_ = 0;
+    sendInputIndex_ = 0;
+    nextSendOutputPosition_ = 0.0;
+    previousSendSample_ = 0.0f;
+    havePreviousSendSample_ = false;
+}
+
+void BridgeProcessor::appendNetworkSample(float sample, uint32_t now) {
+    pending_[pendingSamples_++] = sos::pcm16(sample);
+    if (pendingSamples_ == pending_.size()) {
+        network.enqueue(pending_, now, sequence_++);
+        pendingSamples_ = 0;
+    }
+}
+
+void BridgeProcessor::resampleSendSample(float sample, uint32_t now) {
+    if (!havePreviousSendSample_) {
+        previousSendSample_ = sample;
+        havePreviousSendSample_ = true;
+        appendNetworkSample(sample, now);
+        nextSendOutputPosition_ = sendStep_;
+        return;
+    }
+
+    ++sendInputIndex_;
+    const double currentPosition = double(sendInputIndex_);
+    while (nextSendOutputPosition_ <= currentPosition + 1.0e-9) {
+        const auto fraction = float(std::clamp(
+            nextSendOutputPosition_ - (currentPosition - 1.0), 0.0, 1.0));
+        appendNetworkSample(previousSendSample_ +
+            (sample - previousSendSample_) * fraction, now);
+        nextSendOutputPosition_ += sendStep_;
+    }
+    previousSendSample_ = sample;
+}
+
 bool BridgeProcessor::isBusesLayoutSupported(const BusesLayout& layout) const {
     const auto out = layout.getMainOutputChannelSet();
     return (out == juce::AudioChannelSet::mono() || out == juce::AudioChannelSet::stereo()) &&
@@ -42,20 +75,22 @@ bool BridgeProcessor::isBusesLayoutSupported(const BusesLayout& layout) const {
 }
 
 void BridgeProcessor::prepareToPlay(double rate, int) {
-    rateOK_ = std::abs(rate - double(sos::kSampleRate)) < 0.01;
+    dawSampleRate_ = rate > 0.0 ? rate : double(sos::kSampleRate);
+    dawSampleRateHz_.store(uint32_t(std::lround(dawSampleRate_)));
+    sendStep_ = std::max(0.0001, dawSampleRate_ / double(sos::kSampleRate));
+    network.setReceiveSampleRate(dawSampleRate_);
     network.setEnabled(false);
     network.clearReceive();
-    pendingSamples_ = 0;
+    resetSendResampler();
     lastBlockMs_ = 0;
     wasActive_ = false;
-    gain_.reset(rate > 0 ? rate : sos::kSampleRate, 0.02);
+    gain_.reset(dawSampleRate_, 0.02);
     gain_.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(gainParam_->load()));
 }
 
 void BridgeProcessor::releaseResources() {
     network.setEnabled(false);
-    rateOK_ = false;
-    pendingSamples_ = 0;
+    resetSendResampler();
     wasActive_ = false;
 }
 
@@ -64,13 +99,13 @@ void BridgeProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     midi.clear();
     const bool offline = isNonRealtime();
     offline_ = offline;
-    const bool active = enabledParam_->load() > 0.5f && rateOK_.load() && !offline;
+    const bool active = enabledParam_->load() > 0.5f && !offline;
     network.setEnabled(active);
     const auto now = juce::Time::getMillisecondCounter();
     const auto maxGap = std::max(uint32_t(250),
-        uint32_t(double(buffer.getNumSamples()) * 3000.0 / sos::kSampleRate));
+        uint32_t(double(buffer.getNumSamples()) * 3000.0 / dawSampleRate_));
     if (active != wasActive_ || uint32_t(now - lastBlockMs_) > maxGap) {
-        pendingSamples_ = 0;
+        resetSendResampler();
         network.clearReceive();
         wasActive_ = active;
     }
@@ -86,17 +121,13 @@ void BridgeProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
                 float mono = 0;
                 for (int ch = 0; ch < inputChannels; ++ch)
                     mono += buffer.getSample(ch, i);
-                pending_[pendingSamples_++] = sos::pcm16(mono / float(inputChannels) * gain_.getNextValue());
-                if (pendingSamples_ == pending_.size()) {
-                    network.enqueue(pending_, juce::Time::getMillisecondCounter(), sequence_++);
-                    pendingSamples_ = 0;
-                }
+                resampleSendSample(
+                    mono / float(inputChannels) * gain_.getNextValue(), now);
             }
         } else {
-            pendingSamples_ = 0;
+            resetSendResampler();
             gain_.skip(buffer.getNumSamples());
         }
-        if (monitorParam_->load() < 0.5f) buffer.clear();
     } else {
         network.prepareReceive();
         if (!active || !network.connected()) {
@@ -115,17 +146,23 @@ void BridgeProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
 void BridgeProcessor::processBlockBypassed(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi) {
     network.setEnabled(false);
     network.clearReceive();
-    pendingSamples_ = 0;
+    resetSendResampler();
     wasActive_ = false;
     midi.clear();
     if constexpr (!sending) buffer.clear();
 }
 
 juce::String BridgeProcessor::displayStatus() const {
-    if (!rateOK_.load()) return "Set the DAW sample rate to 48000 Hz";
     if (offline_.load()) return "Offline export: network audio is disabled";
     if (enabledParam_->load() < 0.5f) return "Network disabled";
-    return network.status();
+    auto status = network.status();
+    const auto rate = dawSampleRateHz_.load();
+    if (rate != sos::kSampleRate) {
+        status += sending
+            ? " | Resampling " + juce::String(rate) + " -> 48000 Hz"
+            : " | Resampling 48000 -> " + juce::String(rate) + " Hz";
+    }
+    return status;
 }
 
 void BridgeProcessor::getStateInformation(juce::MemoryBlock& destination) {

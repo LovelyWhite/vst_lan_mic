@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include <WiFiUdp.h>
 #include <esp_arduino_version.h>
 #include <esp_heap_caps.h>
@@ -21,15 +22,40 @@
 #endif
 #include "AudioBuffer.h"
 
-#if __has_include("WifiConfig.h")
-#include "WifiConfig.h"
-#endif
-#ifndef SOS_WIFI_SSID
-#define SOS_WIFI_SSID ""
-#define SOS_WIFI_PASSWORD ""
-#endif
-
 namespace {
+constexpr uint8_t kWifiResetPin = 0;
+constexpr uint32_t kWifiResetHoldMs = 3000;
+constexpr char kProvisioningHead[] = R"HTML(
+<style>
+:root{color-scheme:light}
+body{background:#f5f7f8!important;color:#263238!important;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important}
+.wrap{max-width:460px!important;padding:24px!important}
+h1{color:#168f81!important;letter-spacing:.04em}
+h3{color:#607d80!important}
+button{background:#168f81!important;color:#fff!important;border:0!important;border-radius:10px!important;font-weight:600!important}
+input,select{background:#fff!important;color:#263238!important;border:1px solid #b8c9cc!important;border-radius:8px!important}
+a{color:#13776d!important}
+form[action="/"]{display:none!important}
+</style>
+<script>
+document.addEventListener("DOMContentLoaded",function(){
+  document.title="SUXITECH LAN MIC";
+  if(location.pathname==="/"){
+    location.replace("/wifi");
+    return;
+  }
+  var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+  var nodes=[],node;
+  while(node=walker.nextNode())nodes.push(node);
+  nodes.forEach(function(n){
+    n.nodeValue=n.nodeValue
+      .replace(/WiFiManager/g,"SUXITECH LAN MIC")
+      .replace(/ESP(?:32|8266)?/g,"LAN MIC");
+  });
+});
+</script>
+)HTML";
+
 audio_tools::USBAudioStream usb;
 sos::Playout microphone;
 struct CapturedFrame {
@@ -39,6 +65,7 @@ struct CapturedFrame {
 sos::SpscRing<CapturedFrame, 8> captured;
 std::atomic<uint32_t> uplinkEpoch{0}, lastUplinkMs{0};
 std::atomic<uint32_t> capturedDrops{0}, sentPackets{0}, receivedPackets{0};
+std::atomic<bool> wifiResetInProgress{false};
 // #region debug-point A-L:audio-path-metrics
 std::atomic<uint32_t> debugMicMin{UINT32_MAX}, debugMicMax{0};
 std::atomic<uint32_t> debugUsbTxMin{UINT32_MAX}, debugUsbTxMax{0};
@@ -185,6 +212,15 @@ void networkTask(void*) {
         ++uplinkEpoch;
     };
     for (;;) {
+        if (wifiResetInProgress.load(std::memory_order_acquire)) {
+            if (socketsReady) {
+                control.stop();
+                audio.stop();
+                socketsReady = false;
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
         // #region debug-point F:network-stack
         debugNetworkStackMin.store(std::min(debugNetworkStackMin.load(),
             uint32_t(uxTaskGetStackHighWaterMark(nullptr))));
@@ -198,7 +234,7 @@ void networkTask(void*) {
                 invalidateSender();
                 receiver = Peer{};
             }
-            if (uint32_t(now - lastRetry) >= 5000 && strlen(SOS_WIFI_SSID) > 0) {
+            if (uint32_t(now - lastRetry) >= 5000) {
                 lastRetry = now;
                 WiFi.reconnect();
             }
@@ -369,13 +405,17 @@ void setup() {
     snprintf(identity, sizeof(identity), "%s-%s", sos::kDeviceName, usbSerial);
     bootSession = esp_random();
     if (!bootSession) bootSession = 1;
+    char provisioningSsid[33]{};
+    snprintf(provisioningSsid, sizeof(provisioningSsid),
+             "SUXITECH-LAN-MIC-%06llX",
+             (unsigned long long)(mac & 0xFFFFFFULL));
 
     audio_tools::USBAudioConfig config;
     config.sample_rate = sos::kSampleRate;
     config.channels = 2;
     config.bits_per_sample = 16;
     config.product = sos::kDeviceName;
-    config.manufacturer = "Studio One Stream";
+    config.manufacturer = "SUXITECH";
     config.serial = usbSerial;
     config.enable_ep_in = config.enable_ep_out = true;
     config.enable_feedback_ep = false;
@@ -393,11 +433,23 @@ void setup() {
         Serial.println("USB audio initialization failed");
         return;
     }
-    WiFi.mode(WIFI_STA);
+    pinMode(kWifiResetPin, INPUT_PULLUP);
+    WiFiManager wifiManager;
+    wifiManager.setDebugOutput(false);
+    wifiManager.setConnectTimeout(15);
+    wifiManager.setConfigPortalTimeout(0);
+    wifiManager.setCustomHeadElement(kProvisioningHead);
+    wifiManager.setShowStaticFields(false);
+    wifiManager.setShowDnsFields(false);
+    wifiManager.setShowInfoErase(false);
+    Serial.printf("Open Wi-Fi provisioning AP: %s\n", provisioningSsid);
+    if (!wifiManager.autoConnect(provisioningSsid)) {
+        Serial.println("Wi-Fi provisioning failed to start; rebooting");
+        delay(1000);
+        ESP.restart();
+    }
     WiFi.setSleep(false);
     WiFi.setAutoReconnect(true);
-    if (strlen(SOS_WIFI_SSID) > 0) WiFi.begin(SOS_WIFI_SSID, SOS_WIFI_PASSWORD);
-    else Serial.println("Configure include/WifiConfig.h before using network audio");
     const auto audioResult = xTaskCreatePinnedToCore(audioTask, "sos-audio", 8192, nullptr, 4, nullptr, 1);
     const auto netResult = xTaskCreatePinnedToCore(networkTask, "sos-network", 16384, nullptr, 2, nullptr, 0);
     if (audioResult != pdPASS || netResult != pdPASS)
@@ -405,7 +457,40 @@ void setup() {
 }
 
 void loop() {
-    delay(5000);
+    static uint32_t lastDebugMs = millis();
+    static uint32_t wifiResetPressedMs = 0;
+    static bool wifiResetArmed = false;
+    delay(25);
+
+    const uint32_t now = millis();
+    if (digitalRead(kWifiResetPin) == LOW) {
+        if (!wifiResetPressedMs) wifiResetPressedMs = now;
+        if (!wifiResetArmed &&
+            uint32_t(now - wifiResetPressedMs) >= kWifiResetHoldMs) {
+            wifiResetArmed = true;
+            Serial.println("Wi-Fi reset armed; release BOOT to restart provisioning");
+        }
+    } else {
+        wifiResetPressedMs = 0;
+        if (wifiResetArmed) {
+            Serial.println("Clearing saved Wi-Fi credentials");
+            wifiResetInProgress.store(true, std::memory_order_release);
+            WiFi.setAutoReconnect(false);
+            delay(100);
+            WiFi.disconnect(false, false, 1000);
+            delay(100);
+            const bool erased = WiFi.eraseAP();
+            WiFi.mode(WIFI_OFF);
+            Serial.println(erased
+                ? "Saved Wi-Fi credentials cleared"
+                : "Failed to clear saved Wi-Fi credentials");
+            delay(250);
+            ESP.restart();
+        }
+    }
+
+    if (uint32_t(now - lastDebugMs) < 5000) return;
+    lastDebugMs = now;
     // #region debug-point A-L:serial-snapshot
     Serial.printf("[DEBUG] session=audio-crackle-stability run=post-fix-15 hypotheses=A,B,C,D,E,F,G,H,I,J,K,L "
         "wifi=%d rssi=%d usb=%d tx=%d rx=%d up=%lu down=%lu under=%lu trim=%lu overflow=%lu drop=%lu "

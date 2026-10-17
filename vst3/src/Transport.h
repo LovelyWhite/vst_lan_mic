@@ -16,6 +16,11 @@ public:
     juce::String status() const;
     std::vector<Device> devices() const;
     void enqueue(const sos::Frame&, uint32_t now, uint32_t sequence);
+    void setReceiveSampleRate(double outputRate) {
+        const auto safeRate = outputRate > 0.0 ? outputRate : double(sos::kSampleRate);
+        incoming_.setNominalRatio(float(double(sos::kSampleRate) / safeRate));
+        incoming_.reset();
+    }
     void prepareReceive();
     float receiveSample() { return incoming_.next(); }
     void clearReceive() { incoming_.reset(); }

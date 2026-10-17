@@ -13,9 +13,9 @@ private:
     juce::Label title_, direction_, deviceLabel_, gainLabel_, status_, counters_, hint_;
     juce::ComboBox device_;
     juce::Slider gain_;
-    juce::ToggleButton enabled_{"Network enabled"}, monitor_{"Local pass-through"};
+    juce::ToggleButton enabled_{"Network enabled"};
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gainAttachment_;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> enabledAttachment_, monitorAttachment_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> enabledAttachment_;
     juce::StringArray deviceIds_;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(BridgeEditor)
 };

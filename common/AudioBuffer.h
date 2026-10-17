@@ -123,10 +123,15 @@ public:
     void push(const Frame& frame) {
         if (!queue.push(frame.data(), uint32_t(frame.size()))) ++overflows;
     }
+    void setNominalRatio(float ratio) {
+        nominalRatio_ = std::max(0.125f, std::min(8.0f, ratio));
+        ratio_ = nominalRatio_;
+    }
     void reset() {
         queue.clear();
         primed_ = false;
         phase_ = 0;
+        ratio_ = nominalRatio_;
         previous_ = 0;
         fade_ = 0;
     }
@@ -137,9 +142,10 @@ public:
             primed_ = false;
             ++trims;
         }
-        const float desired = 1.0f + std::max(-maxRateCorrection,
+        const float correction = std::max(-maxRateCorrection,
             std::min(maxRateCorrection,
                 (float(queue.size()) - float(target)) * 0.000002f));
+        const float desired = nominalRatio_ * (1.0f + correction);
         ratio_ += (desired - ratio_) * 0.02f;
     }
     float next() {
@@ -172,7 +178,7 @@ public:
 private:
     bool primed_ = false;
     int16_t a_ = 0, b_ = 0;
-    float phase_ = 0, ratio_ = 1;
+    float phase_ = 0, nominalRatio_ = 1, ratio_ = 1;
     float previous_ = 0, fade_ = 0;
 };
 } // namespace sos

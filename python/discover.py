@@ -1,4 +1,4 @@
-"""Discover Studio One Stream devices without reserving either audio direction."""
+"""Discover SUXITECH LAN MIC devices without reserving either audio direction."""
 
 import argparse
 import socket

@@ -9,7 +9,7 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
                        juce::dontSendNotification);
     deviceLabel_.setText("Device", juce::dontSendNotification);
     gainLabel_.setText("Network gain", juce::dontSendNotification);
-    hint_.setText("48 kHz | PCM16 mono | Stereo USB | Use a trusted local network",
+    hint_.setText("Auto sample-rate conversion | 48 kHz network mono | Stereo USB",
                   juce::dontSendNotification);
     hint_.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
     status_.setMinimumHorizontalScale(0.65f);
@@ -22,15 +22,11 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
     addAndMakeVisible(device_);
     addAndMakeVisible(gain_);
     addAndMakeVisible(enabled_);
-    if constexpr (BridgeProcessor::sending) addAndMakeVisible(monitor_);
 
     gainAttachment_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         processor.parameters, "gain", gain_);
     enabledAttachment_ = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         processor.parameters, "enabled", enabled_);
-    if constexpr (BridgeProcessor::sending)
-        monitorAttachment_ = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-            processor.parameters, "monitor", monitor_);
     device_.onChange = [this] {
         const int index = device_.getSelectedId() - 2;
         processor_.network.setPreferredDevice(index >= 0 && index < deviceIds_.size()
@@ -61,7 +57,6 @@ void BridgeEditor::resized() {
     gain_.setBounds(gainRow);
     auto switches = area.removeFromTop(36);
     enabled_.setBounds(switches.removeFromLeft(210));
-    monitor_.setBounds(switches);
     status_.setBounds(area.removeFromTop(28));
     counters_.setBounds(area.removeFromTop(25));
     hint_.setBounds(area.removeFromTop(24));

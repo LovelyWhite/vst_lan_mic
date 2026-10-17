@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(StudioOneStream VERSION 0.1.0 LANGUAGES C CXX)
+project(SUXITECH_LAN_MIC_VST3 VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,9 +44,9 @@ endif()
 
 function(add_bridge_plugin target code sending)
     juce_add_plugin(${target}
-        COMPANY_NAME "Studio One Stream"
-        BUNDLE_ID "com.studioonestream.${target}"
-        PLUGIN_MANUFACTURER_CODE SoSt
+        COMPANY_NAME "SUXITECH"
+        BUNDLE_ID "cn.suxitech.${target}"
+        PLUGIN_MANUFACTURER_CODE SoSu
         PLUGIN_CODE ${code}
         PRODUCT_NAME "${target}"
         FORMATS VST3
