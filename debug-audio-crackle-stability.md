@@ -325,6 +325,13 @@
 - 诊断 runId 改为 `post-fix-15`。通过条件：`opusBytes=480..480/opusErr=0`，
   `udpFail/superseded` 不持续增长，并由实际监听确认杂音消失或明显降低。
 
+## Opus Memory Placement Override
+- 按当前要求，Opus 编码器状态从 PSRAM 改为显式内部 RAM：
+  `MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`。此前 Post-fix 10 的 PSRAM 分配记录
+  仍是当时的历史证据，不代表当前配置。
+- 重新验收时必须确认编码器初始化成功，并观察 `minHeap/maxBlock/udpFail`；
+  若最大连续块不足，初始化会直接失败，不允许静默回退到 PSRAM。
+
 ## Final Evidence Gate
 - **Evidence Sources**: 上述 UART 日志；待采集含诊断字段的 UART 日志
 - **progress_status**: collecting post-fix evidence

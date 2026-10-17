@@ -112,8 +112,9 @@ Receiver 通过订阅登记接收端口。固件从 45679 向该端口单播音�
 ## 依赖边界
 
 USB 音频类由固定版本 `arduino-audio-tools` 提供，包括描述符、控制请求及传输回调。
-固件 Opus 依赖固定为 `codec-opus` 1.6.1，编码器状态显式分配到 PSRAM；
-桌面插件通过 CMake 获取官方 Xiph Opus 1.6.1 并静态链接。
+固件 Opus 依赖固定为 `codec-opus` 1.6.1，编码器状态当前显式分配到内部 RAM；
+桌面插件通过 CMake 获取官方 Xiph Opus 1.6.1 并静态链接。固件需持续监控
+内部堆最小值、最大连续块及 UDP 发送失败。
 当前 Arduino 3.3.12 提供 `USB_INTERFACE_AUDIO`，固件直接使用该接口槽。
 对于较早的 Arduino 2/3 版本，在唯一引入 USB 音频头文件的翻译单元中，
 将该名字适配到 `USB_INTERFACE_CUSTOM`。Arduino 2/3 以外的主版本需要重新检查适配。

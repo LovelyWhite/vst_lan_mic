@@ -183,8 +183,9 @@ void networkTask(void*) {
     IPAddress boundIp;
     std::array<uint8_t, sos::kMaxPacketSize + 1> packet{};
     const int opusEncoderBytes = opus_encoder_get_size(1);
+    // Keep the complete encoder state in internal RAM; do not fall back to PSRAM.
     void* opusMemory = opusEncoderBytes > 0
-        ? heap_caps_malloc(size_t(opusEncoderBytes), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        ? heap_caps_malloc(size_t(opusEncoderBytes), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
         : nullptr;
     auto* opusEncoder = static_cast<OpusEncoder*>(opusMemory);
     int opusStatus = opusEncoder

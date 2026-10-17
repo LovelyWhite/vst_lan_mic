@@ -1,0 +1,7 @@
+{
+  "files.associations": {
+    "*.wxml": "wxml",
+    "istream": "cpp",
+    "ostream": "cpp"
+  }
+}

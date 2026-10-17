@@ -5,7 +5,8 @@
 ## 构建与枚举
 
 - [ ] 用固定 PlatformIO 依赖完成固件构建，确认 Flash/PSRAM 配置符合实物。
-- [ ] 确认固件没有打印 `Opus encoder initialization failed`，且 Opus 编码器状态占用 PSRAM。
+- [ ] 确认固件没有打印 `Opus encoder initialization failed`，且 Opus 编码器状态
+      成功分配到内部 RAM；记录启动后的 `minHeap` 和 `maxBlock`。
 - [ ] macOS Release、macOS Universal、Windows MSVC 分别完成两个 VST3 目标构建。
 - [ ] 构建后 `vst2esp.vst3`、`esp2vst.vst3` 自动出现在 VST3 插件目录，Studio One 重新扫描后能加载。
 - [ ] 验证 Universal bundle 确实包含 arm64 和 x86_64；Windows 产物在对应架构 DAW 中扫描成功。
@@ -80,7 +81,7 @@ ESP32 麦克风方向和电脑接收方向均约 308 ms，均为网络接收起�
 | Under 持续增长 | Wi-Fi 丢包或调度不足、手机暂停发送、DAW 缓冲设置 |
 | Trim 持续增长 | 时钟差过大、DAW 调度长期停顿或网络突发，检查两端实际采样率 |
 | IO 持续增长 | 网卡/路由变更、socket 不可写、防火墙或系统网络错误 |
-| `opusErr` 增长 | 编码输入帧、Opus 状态或 PSRAM 稳定性；不要仅靠增加 Wi-Fi 缓冲掩盖 |
+| `opusErr` 增长 | 编码输入帧或 Opus 状态异常；同时检查内部 RAM 是否充足 |
 | `opusBytes=4294967295..0` | 尚未编码出首个下行包；先确认手机 USB OUT 与接收插件已连接 |
 | 只有编辑器头文件红线 | 依赖尚未下载或 CMake/PlatformIO IntelliSense 尚未配置，不能据此认定已构建 |
 | 插件目录没有新 bundle | 自动安装是否被 `SOS_COPY_VST3_AFTER_BUILD=OFF` 关闭、目录权限、DAW 是否仍占用旧 bundle |
