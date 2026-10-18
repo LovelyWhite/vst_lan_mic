@@ -44,7 +44,10 @@ std::vector<Transport::Device> Transport::devices() const {
 juce::String Transport::status() const {
     juce::String text;
     switch (state_.load()) {
-        case State::Searching: text = "Searching on the local network"; break;
+        case State::Searching:
+            text = "Searching on " + juce::String(discoveryInterfaces_.load())
+                 + " IPv4 interface(s)";
+            break;
         case State::Connecting: text = "Connecting"; break;
         case State::Connected: text = "Connected"; break;
         case State::Busy: text = "Device direction is in use by another instance"; break;
@@ -84,6 +87,7 @@ void Transport::run() {
     }
 
     while (!threadShouldExit()) {
+        discoveryInterfaces_.store(0);
         juce::DatagramSocket socket(true);
         if (!socket.bindToPort(0)) {
             state_ = State::SocketError;
@@ -91,10 +95,38 @@ void Transport::run() {
             wait(500);
             continue;
         }
+        struct DiscoveryEndpoint {
+            juce::IPAddress directedBroadcast;
+            std::unique_ptr<juce::DatagramSocket> socket;
+        };
+        std::vector<DiscoveryEndpoint> discoveryEndpoints;
+        auto rebuildDiscoveryEndpoints = [&] {
+            std::vector<DiscoveryEndpoint> rebuilt;
+            juce::StringArray boundAddresses;
+            for (const auto& address : juce::IPAddress::getAllAddresses()) {
+                const auto first = address.address[0];
+                if (address.isIPv6 || address.isNull() || first == 0 ||
+                    first == 127 || first >= 224)
+                    continue;
+                const auto text = address.toString();
+                if (boundAddresses.contains(text)) continue;
+                auto interfaceSocket = std::make_unique<juce::DatagramSocket>(true);
+                if (!interfaceSocket->bindToPort(0, text)) continue;
+                boundAddresses.add(text);
+                rebuilt.push_back({
+                    juce::IPAddress::getInterfaceBroadcastAddress(address),
+                    std::move(interfaceSocket)
+                });
+            }
+            discoveryEndpoints = std::move(rebuilt);
+            discoveryInterfaces_.store(uint32_t(discoveryEndpoints.size()));
+        };
+        rebuildDiscoveryEndpoints();
         uint32_t version = preferenceVersion_.load();
         juce::String peerIp, preferred = preferredDevice();
         uint32_t peerBoot = 0, selectedAt = 0, lastAck = 0, lastAudio = 0;
         uint32_t lastDiscover = nowMs() - 1000, lastSubscribe = nowMs() - 1000;
+        uint32_t lastInterfaceRefresh = nowMs();
         uint32_t nextAudioSend = nowMs();
         bool wasEnabled = false, haveAck = false, haveAudio = false;
         bool sequenceValid = false;
@@ -119,11 +151,53 @@ void Transport::run() {
             const juce::ScopedLock lock(settingsLock_);
             selected_.clear();
         };
-        auto sendControl = [&](const juce::String& ip, sos::Kind kind, uint16_t flags) {
+        auto sendControlOn = [&](juce::DatagramSocket& target,
+                                 const juce::String& ip,
+                                 sos::Kind kind,
+                                 uint16_t flags,
+                                 bool countError) {
             sos::Header h{kind, flags, session_, 0, nowMs(), 0};
             const auto bytes = int(sos::encode(packet.data(), h));
-            if (socket.waitUntilReady(false, 0) != 1 ||
-                socket.write(ip, sos::kDiscoveryPort, packet.data(), bytes) != bytes) ++socketErrors;
+            if (target.waitUntilReady(false, 0) != 1 ||
+                target.write(ip, sos::kDiscoveryPort, packet.data(), bytes) != bytes) {
+                if (countError) ++socketErrors;
+            }
+        };
+        auto sendControl = [&](const juce::String& ip, sos::Kind kind, uint16_t flags) {
+            sendControlOn(socket, ip, kind, flags, true);
+        };
+        auto handleOffer = [&](const sos::Header& h,
+                               const juce::String& source,
+                               int port,
+                               uint32_t now) {
+            if (h.kind != sos::Kind::Offer || port != sos::kDiscoveryPort)
+                return false;
+            const auto identity = juce::String::fromUTF8(
+                reinterpret_cast<const char*>(packet.data() + sos::kHeaderSize),
+                h.payloadBytes);
+            if (!identity.startsWith("vst_lan_mic-") ||
+                !identity.containsOnly(
+                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"))
+                return true;
+            {
+                const juce::ScopedLock lock(settingsLock_);
+                auto found = std::find_if(devices_.begin(), devices_.end(),
+                    [&](const Device& d) { return d.identity == identity; });
+                if (found != devices_.end()) *found = {identity, source, now};
+                else if (devices_.size() < 32) devices_.push_back({identity, source, now});
+            }
+            if (peerIp.isEmpty() && (preferred.isEmpty() || preferred == identity)) {
+                peerIp = source;
+                peerBoot = h.session;
+                selectedAt = now;
+                lastSubscribe = now - 1000;
+                state_ = State::Connecting;
+                const juce::ScopedLock lock(settingsLock_);
+                selected_ = identity + " @ " + source;
+            } else if (source == peerIp && h.session != peerBoot) {
+                clearPeer(); // Reboot: require discovery and a fresh lease.
+            }
+            return true;
         };
         clearPeer();
 
@@ -157,16 +231,25 @@ void Transport::run() {
                 resetReceiveState();
                 invalidateAudio();
             }
+            if (uint32_t(now - lastInterfaceRefresh) >= 5000) {
+                lastInterfaceRefresh = now;
+                rebuildDiscoveryEndpoints();
+            }
             if (uint32_t(now - lastDiscover) >= 1000) {
                 lastDiscover = now;
-                // Limited broadcast plus per-interface directed broadcasts
-                // cover machines with Ethernet, Wi-Fi, and VPN adapters.
+                // Windows cannot obtain directed broadcasts through JUCE 8.0.6.
+                // A socket bound to each local address forces limited broadcast
+                // onto every eligible adapter and receives the unicast Offer.
                 sendControl("255.255.255.255", sos::Kind::Discover, 0);
-                for (const auto& address : juce::IPAddress::getAllAddresses()) {
-                    if (address.isIPv6 || address.address[0] == 127) continue;
-                    const auto broadcast = juce::IPAddress::getInterfaceBroadcastAddress(address);
-                    if (!broadcast.isNull() && broadcast != juce::IPAddress::broadcast())
-                        sendControl(broadcast.toString(), sos::Kind::Discover, 0);
+                for (auto& endpoint : discoveryEndpoints) {
+                    sendControlOn(*endpoint.socket, "255.255.255.255",
+                                  sos::Kind::Discover, 0, false);
+                    if (!endpoint.directedBroadcast.isNull() &&
+                        endpoint.directedBroadcast != juce::IPAddress::broadcast()) {
+                        sendControlOn(*endpoint.socket,
+                                      endpoint.directedBroadcast.toString(),
+                                      sos::Kind::Discover, 0, false);
+                    }
                 }
                 const juce::ScopedLock lock(settingsLock_);
                 devices_.erase(std::remove_if(devices_.begin(), devices_.end(),
@@ -176,6 +259,20 @@ void Transport::run() {
             if (enabled && peerIp.isNotEmpty() && uint32_t(now - lastSubscribe) >= 1000) {
                 lastSubscribe = now;
                 sendControl(peerIp, sos::Kind::Subscribe, role);
+            }
+
+            for (auto& endpoint : discoveryEndpoints) {
+                for (int n = 0;
+                     n < 8 && endpoint.socket->waitUntilReady(true, 0) == 1;
+                     ++n) {
+                    juce::String source;
+                    int port = 0;
+                    const int bytes = endpoint.socket->read(
+                        packet.data(), int(packet.size()), false, source, port);
+                    sos::Header h;
+                    if (bytes > 0 && sos::decode(packet.data(), size_t(bytes), h))
+                        handleOffer(h, source, port, now);
+                }
             }
 
             const int ready = socket.waitUntilReady(true, 2);
@@ -191,30 +288,8 @@ void Transport::run() {
                 const int bytes = socket.read(packet.data(), int(packet.size()), false, source, port);
                 sos::Header h;
                 if (bytes <= 0 || !sos::decode(packet.data(), size_t(bytes), h)) continue;
-                if (h.kind == sos::Kind::Offer && port == sos::kDiscoveryPort) {
-                    const auto identity = juce::String::fromUTF8(
-                        reinterpret_cast<const char*>(packet.data() + sos::kHeaderSize), h.payloadBytes);
-                    if (!identity.startsWith("vst_lan_mic-") ||
-                        !identity.containsOnly("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"))
-                        continue;
-                    {
-                        const juce::ScopedLock lock(settingsLock_);
-                        auto found = std::find_if(devices_.begin(), devices_.end(),
-                            [&](const Device& d) { return d.identity == identity; });
-                        if (found != devices_.end()) *found = {identity, source, now};
-                        else if (devices_.size() < 32) devices_.push_back({identity, source, now});
-                    }
-                    if (peerIp.isEmpty() && (preferred.isEmpty() || preferred == identity)) {
-                        peerIp = source;
-                        peerBoot = h.session;
-                        selectedAt = now;
-                        lastSubscribe = now - 1000;
-                        state_ = State::Connecting;
-                        const juce::ScopedLock lock(settingsLock_);
-                        selected_ = identity + " @ " + source;
-                    } else if (source == peerIp && h.session != peerBoot) {
-                        clearPeer(); // Reboot: require discovery and a fresh lease.
-                    }
+                if (handleOffer(h, source, port, now)) {
+                    // Discovery responses may arrive on the main fallback socket.
                 } else if (h.kind == sos::Kind::Ack && source == peerIp &&
                            port == sos::kDiscoveryPort && h.session == session_ &&
                            (h.flags & ~sos::Busy) == role && enabled) {
@@ -312,5 +387,6 @@ void Transport::run() {
         invalidateAudio();
         if (!threadShouldExit()) wait(100);
     }
+    discoveryInterfaces_.store(0);
     if (decoder) opus_decoder_destroy(decoder);
 }

@@ -40,6 +40,7 @@ private:
     const uint32_t session_;
     std::atomic<bool> enabled_{false};
     std::atomic<State> state_{State::Searching};
+    std::atomic<uint32_t> discoveryInterfaces_{0};
     std::atomic<uint32_t> preferenceVersion_{0}, audioEpoch_{0};
     uint32_t consumedEpoch_ = 0; // Audio-thread owned.
     sos::SpscRing<Outgoing, 32> outgoing_;

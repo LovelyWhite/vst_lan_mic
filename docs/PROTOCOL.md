@@ -40,7 +40,10 @@ Discover、Subscribe、Ack 无负载。接收方拒绝错误版本、采样率�
 ## 发现与订阅
 
 1. 固件监听 UDP 45678（控制）和 45679（上行音频）。
-2. 每个插件绑定自己的临时本地端口，每秒向局域网广播 Discover。
+2. 每个插件绑定自己的主临时端口，并为每个有效 IPv4 接口绑定独立的临时发现
+   socket，每秒从各接口广播 Discover。Windows 上 JUCE 8.0.6 无法提供接口定向
+   广播地址，因此各绑定 socket 发送 limited broadcast，避免 VPN、虚拟网卡或
+   多网卡让发现包只从错误接口发出。
 3. 固件单播 Offer 回请求来源端口，payload 为 `vst_lan_mic-<eFuse MAC>`，session 为本次开机随机 ID。
 4. 插件自动选择最先发现的设备，或选择用户指定身份。DHCP 地址不保存在工程中。
 5. 插件每秒向选中设备 45678 发送 Subscribe，flags 为 Sender 或 Receiver，session 为插件实例随机 ID。

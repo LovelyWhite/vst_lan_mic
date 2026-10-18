@@ -18,6 +18,10 @@
 - [ ] 重启后设备直接使用 NVS 凭据连接；运行时长按 BOOT 约 3 秒并松开后，
       凭据被清除且设备重新进入配网。
 - [ ] UART 日志打印 Wi-Fi 地址和设备身份，没有 USB 初始化或任务创建失败。
+- [ ] Windows Studio One 中搜索状态显示至少 `1 IPv4 interface(s)`；同时启用
+      Wi-Fi、以太网、VPN 或虚拟网卡时，仍能从 ESP32 所在接口发现设备。
+- [ ] Windows 网络配置为“专用”，Windows Defender 防火墙允许 Studio One 在
+      专用网络收发 UDP；禁用 VPN 后的结果也记录在案。
 - [ ] 双向流开启后 `usbTxPacket=192`；若为 196，USB IN 会按 49 kHz 消耗并周期欠载。
 - [ ] 先接电脑检查 USB 描述符：UAC2、48 kHz、16 bit、输入输出各 2 通道，无原生 CDC。
 - [ ] 再接目标 Android/iPhone，确认系统识别设备并在目标应用中使用外置输入输出。
@@ -73,7 +77,8 @@ ESP32 麦克风方向和电脑接收方向均约 308 ms，均为网络接收起�
 
 | 现象 | 检查方向 |
 | --- | --- |
-| Searching | Wi-Fi 配置、同网段、本地网络权限、UDP 广播、防火墙、AP 隔离 |
+| `Searching on 0 IPv4 interface(s)` | 本机没有可绑定的 IPv4 网卡，检查网卡状态和 IPv4 配置 |
+| `Searching on N IPv4 interface(s)` | 已从 N 个接口广播；仍无设备时检查同网段、Windows 专用网络、防火墙和 AP 隔离 |
 | Connecting | DAW 是否实际在处理、Network enabled、订阅返回包是否被阻挡 |
 | Busy | 同一方向是否被另一个插件实例占用，等待租约到期 |
 | Connected 但没有音频 | USB 流是否打开、手机应用输入选择、DAW 路由与监听 |

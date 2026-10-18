@@ -156,6 +156,11 @@ vst3/build/esp2vst_artefacts/Release/VST3/esp2vst.vst3
 - 两个 bundle 的路径固定为
   `vst3/build/vst2esp_artefacts/Release/VST3/vst2esp.vst3` 与
   `vst3/build/esp2vst_artefacts/Release/VST3/esp2vst.vst3`，也可手动拷贝。
+- Windows 自动发现会为每个有效 IPv4 地址绑定独立 UDP socket，避免广播被 VPN、
+  虚拟网卡或错误的默认路由截走。搜索状态中的数字是成功绑定的接口数量。
+- Windows 网络应设为“专用”，并允许 Studio One 在专用网络通过 Windows Defender
+  防火墙收发 UDP。显示 `Searching on 0 IPv4 interface(s)` 时先检查本机 IPv4 网卡；
+  数字大于零但仍无设备时检查防火墙、AP 客户端隔离以及电脑与 ESP32 是否同网段。
 
 ### 4. Studio One 路由
 
