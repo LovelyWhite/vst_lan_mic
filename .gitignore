@@ -4,4 +4,4 @@ build-*/
 .venv/
 __pycache__/
 .vs/
-WifiConfig.h
+esp32s3/include/WifiConfig.h
