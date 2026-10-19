@@ -40,6 +40,8 @@
 - [ ] iOS 静音时 `usbMute=1/1` 且 DAW 返回静音；解除后平滑恢复。调节期间
       `usbRxDrop/under/udpFail` 不增长，Android 原有收发行为不回退。
 - [ ] 稳态下 `udpFail`、`superseded`、`under` 不再增长；5 秒内下行约发送 250 个 Opus 包。
+- [ ] DAW 到手机方向出现孤立丢包时，`upLost` 与 `upBridge` 同步增长，
+      `under=0`、`usbTxDone=192..192`，且不再听到原有约 28 ms 的静音凹陷。
 - [ ] 人为造成短时下行丢包，确认 Opus PLC 平滑补偿且恢复边界无爆音；超过 300 ms 后不会追赶旧音频。
 - [ ] 改变 Network gain，确认只调整手机录音音量且无突变，发送插件的本地原始输出不变。
 - [ ] 检查应用切换、锁屏、USB 接口关闭/重新打开后能恢复，无旧声音重播。

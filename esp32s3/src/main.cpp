@@ -72,13 +72,17 @@ sos::SpscRing<CapturedFrame, 8> captured;
 std::atomic<uint32_t> uplinkEpoch{0}, lastUplinkMs{0};
 std::atomic<uint32_t> capturedDrops{0}, sentPackets{0}, receivedPackets{0};
 std::atomic<bool> wifiResetInProgress{false};
-// #region debug-point A-N:audio-path-metrics
+// #region debug-point P-Q-R-S:audio-path-metrics
 std::atomic<uint32_t> debugMicMin{UINT32_MAX}, debugMicMax{0};
 std::atomic<uint32_t> debugUsbTxMin{UINT32_MAX}, debugUsbTxMax{0};
 std::atomic<uint32_t> debugUsbRxMin{UINT32_MAX}, debugUsbRxMax{0};
+std::atomic<uint32_t> debugAudioLoopGapMax{0};
+std::atomic<uint32_t> debugUsbTxProgressGapMax{0}, debugUsbTxAdvanceMax{0};
+std::atomic<uint32_t> debugUsbTxDoneMin{UINT32_MAX}, debugUsbTxDoneMax{0};
 std::atomic<uint32_t> debugCapturePeak{0}, debugSendBatchMax{0}, debugFrameAgeMax{0};
 std::atomic<uint32_t> debugUdpFailures{0}, debugUdpFailureBurst{0}, debugUdpFailureBurstMax{0};
-std::atomic<uint32_t> debugUplinkLost{0}, debugUplinkGapMax{0}, debugStaleDrops{0}, debugSuperseded{0};
+std::atomic<uint32_t> debugUplinkLost{0}, debugUplinkGapMax{0}, debugUplinkBridged{0};
+std::atomic<uint32_t> debugStaleDrops{0}, debugSuperseded{0};
 std::atomic<uint32_t> debugUplinkArrivalMax{0}, debugUplinkSourceMax{0};
 std::atomic<uint32_t> debugNetworkStackMin{UINT32_MAX};
 std::atomic<uint32_t> debugOpusErrors{0}, debugOpusBytesMin{UINT32_MAX}, debugOpusBytesMax{0};
@@ -132,6 +136,9 @@ void audioTask(void*) {
     std::array<int16_t, 96> micSamples{};
     int32_t speakerLeftGainQ16 = int32_t(kUsbUnityGainQ16);
     int32_t speakerRightGainQ16 = int32_t(kUsbUnityGainQ16);
+    uint32_t lastAudioLoopMs = millis();
+    uint32_t lastUsbTxProgressMs = lastAudioLoopMs;
+    uint32_t lastUsbTxCount = usb.getTxXferCount();
     auto smoothGain = [](int32_t current, int32_t target) {
         const int32_t difference = target - current;
         if (difference == 0) return current;
@@ -140,9 +147,10 @@ void audioTask(void*) {
         return current + step;
     };
     for (;;) {
+        const uint32_t audioLoopNow = millis();
         const bool txActive = usb.mounted() && usb.isStreamingActiveTx();
         const bool rxActive = usb.mounted() && usb.isStreamingActiveRx();
-        // #region debug-point B-C-E:buffer-levels
+        // #region debug-point Q:playout-levels
         const uint32_t micLevel = microphone.queue.size();
         const uint32_t usbTxLevel = uint32_t(usb.bufferTx().available());
         const uint32_t usbRxLevel = uint32_t(usb.bufferRx().available());
@@ -153,6 +161,30 @@ void audioTask(void*) {
         debugUsbRxMin.store(std::min(debugUsbRxMin.load(), usbRxLevel));
         debugUsbRxMax.store(std::max(debugUsbRxMax.load(), usbRxLevel));
         debugCapturePeak.store(std::max(debugCapturePeak.load(), captured.size()));
+        // #endregion
+        // #region debug-point R:usb-in-progress
+        debugAudioLoopGapMax.store(std::max(
+            debugAudioLoopGapMax.load(), uint32_t(audioLoopNow - lastAudioLoopMs)));
+        lastAudioLoopMs = audioLoopNow;
+        const uint32_t usbTxCount = usb.getTxXferCount();
+        if (txActive && usbTxCount != lastUsbTxCount) {
+            debugUsbTxProgressGapMax.store(std::max(
+                debugUsbTxProgressGapMax.load(),
+                uint32_t(audioLoopNow - lastUsbTxProgressMs)));
+            debugUsbTxAdvanceMax.store(std::max(
+                debugUsbTxAdvanceMax.load(), uint32_t(usbTxCount - lastUsbTxCount)));
+            const uint32_t completedBytes = usb.getTxXferredLast();
+            if (completedBytes != 0) {
+                debugUsbTxDoneMin.store(std::min(
+                    debugUsbTxDoneMin.load(), completedBytes));
+                debugUsbTxDoneMax.store(std::max(
+                    debugUsbTxDoneMax.load(), completedBytes));
+            }
+            lastUsbTxProgressMs = audioLoopNow;
+        } else if (!txActive) {
+            lastUsbTxProgressMs = audioLoopNow;
+        }
+        lastUsbTxCount = usbTxCount;
         // #endregion
         const auto newEpoch = uplinkEpoch.load(std::memory_order_acquire);
         const bool fresh = uint32_t(millis() - lastUplinkMs.load()) < sos::kAudioTimeoutMs;
@@ -377,9 +409,10 @@ void networkTask(void*) {
                     lastValidAudio = now;
                     lastUplinkMs.store(now, std::memory_order_release);
                     ++receivedPackets;
-                    // #region debug-point B-C:uplink-gaps
+                    // #region debug-point P-S:uplink-gaps
                     debugUplinkLost.store(sequence.lost);
                     debugUplinkGapMax.store(sequence.maxGap);
+                    debugUplinkBridged.store(sequence.bridged);
                     // #endregion
                 }
             }
@@ -564,13 +597,15 @@ void loop() {
 
     if (uint32_t(now - lastDebugMs) < 5000) return;
     lastDebugMs = now;
-    // #region debug-point A-N:serial-snapshot
-    Serial.printf("[DEBUG] session=audio-crackle-stability run=post-fix-17 hypotheses=A,B,C,D,E,F,G,H,I,J,K,L,M,N "
+    // #region debug-point P-Q-R-S:serial-snapshot
+    Serial.printf("[DEBUG] session=daw-phone-stutter run=post-fix hypotheses=P,Q,R,S "
         "wifi=%d rssi=%d usb=%d tx=%d rx=%d up=%lu down=%lu under=%lu trim=%lu overflow=%lu drop=%lu "
         "mic=%lu..%lu usbTx=%lu..%lu usbTxPacket=%u usbRx=%lu..%lu "
+        "audioLoopGapMax=%lu usbTxGapMax=%lu usbTxAdvanceMax=%lu usbTxDone=%lu..%lu "
         "usbVol=%u/%u usbMute=%u/%u "
         "usbRxDrop=%lu txXfer=%lu rxXfer=%lu "
-        "capPeak=%lu sendBatch=%lu frameAgeMax=%lu stale=%lu superseded=%lu upLost=%lu upGap=%lu "
+        "capPeak=%lu sendBatch=%lu frameAgeMax=%lu stale=%lu superseded=%lu "
+        "upLost=%lu upGap=%lu upBridge=%lu "
         "upArrivalMax=%lu upSourceMax=%lu "
         "udpFail=%lu udpFailBurst=%lu opusBytes=%lu..%lu opusErr=%lu "
         "netStackMin=%lu queueCap=%u target=%u "
@@ -585,6 +620,11 @@ void loop() {
         (unsigned long)debugUsbTxMin.exchange(UINT32_MAX), (unsigned long)debugUsbTxMax.exchange(0),
         unsigned(usb.getTxFrameBytesLast()),
         (unsigned long)debugUsbRxMin.exchange(UINT32_MAX), (unsigned long)debugUsbRxMax.exchange(0),
+        (unsigned long)debugAudioLoopGapMax.exchange(0),
+        (unsigned long)debugUsbTxProgressGapMax.exchange(0),
+        (unsigned long)debugUsbTxAdvanceMax.exchange(0),
+        (unsigned long)debugUsbTxDoneMin.exchange(UINT32_MAX),
+        (unsigned long)debugUsbTxDoneMax.exchange(0),
         unsigned((usbSpeakerLeftGainQ16.load() * 100 + 32768) >> 16),
         unsigned((usbSpeakerRightGainQ16.load() * 100 + 32768) >> 16),
         unsigned(usbSpeakerLeftMuted.load()), unsigned(usbSpeakerRightMuted.load()),
@@ -594,6 +634,7 @@ void loop() {
         (unsigned long)debugStaleDrops.load(), (unsigned long)debugSuperseded.load(),
         (unsigned long)debugUplinkLost.load(),
         (unsigned long)debugUplinkGapMax.load(),
+        (unsigned long)debugUplinkBridged.load(),
         (unsigned long)debugUplinkArrivalMax.exchange(0),
         (unsigned long)debugUplinkSourceMax.exchange(0),
         (unsigned long)debugUdpFailures.load(), (unsigned long)debugUdpFailureBurstMax.load(),

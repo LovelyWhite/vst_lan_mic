@@ -62,6 +62,31 @@ public:
             if (delta > 0) {
                 lost += delta;
                 maxGap = std::max(maxGap, delta);
+                if (delta <= 2) {
+                    // Bridge isolated gaps without the audible fade-to-silence
+                    // dip used for longer interruptions.
+                    const uint32_t bridgeSamples =
+                        delta * uint32_t(frame.size());
+                    const float start = float(lastSample_);
+                    const float change = float(frame.front()) - start;
+                    Frame scratch{};
+                    for (uint32_t missing = 0; missing < delta; ++missing) {
+                        for (size_t i = 0; i < scratch.size(); ++i) {
+                            const uint32_t position =
+                                missing * uint32_t(scratch.size()) +
+                                uint32_t(i) + 1;
+                            scratch[i] = int16_t(start + change *
+                                (float(position) /
+                                 float(bridgeSamples + 1)));
+                        }
+                        sink(scratch);
+                    }
+                    bridged += delta;
+                    next_ = seq + 1;
+                    lastSample_ = frame.back();
+                    sink(frame);
+                    return true;
+                }
                 constexpr uint32_t concealFramesMax =
                     (300 + kFrameDurationMs - 1) / kFrameDurationMs;
                 const uint32_t concealFrames = std::min(delta, concealFramesMax);
@@ -89,7 +114,7 @@ public:
         sink(frame);
         return true;
     }
-    uint32_t lost = 0, maxGap = 0;
+    uint32_t lost = 0, maxGap = 0, bridged = 0;
 private:
     bool valid_ = false;
     uint32_t next_ = 0;
