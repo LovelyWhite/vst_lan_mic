@@ -34,6 +34,11 @@
 - [ ] 左右声道分别发送信号，确认平均下混和双通道复制符合预期，无左右通道错位。
 - [ ] 持续启用双向传输至少 30 分钟，记录欠载、丢包、裁剪计数和听感。
 - [ ] `post-fix-15` 日志中 `opusErr=0`，`opusBytes=480..480`，并确认 DAW 返回音频没有压缩杂音。
+- [ ] iOS 播放并连续调节系统音量，`post-fix-17` 的 `usbVol=L/R` 随之变化；
+      DAW 返回音量按听感均匀变化，最低档接近静音，且不再出现
+      `USBAudioStreamBase setVolume` Warning。
+- [ ] iOS 静音时 `usbMute=1/1` 且 DAW 返回静音；解除后平滑恢复。调节期间
+      `usbRxDrop/under/udpFail` 不增长，Android 原有收发行为不回退。
 - [ ] 稳态下 `udpFail`、`superseded`、`under` 不再增长；5 秒内下行约发送 250 个 Opus 包。
 - [ ] 人为造成短时下行丢包，确认 Opus PLC 平滑补偿且恢复边界无爆音；超过 300 ms 后不会追赶旧音频。
 - [ ] 改变 Network gain，确认只调整手机录音音量且无突变，发送插件的本地原始输出不变。

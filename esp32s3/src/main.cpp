@@ -6,6 +6,7 @@
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp32-hal-tinyusb.h>
+#include <cmath>
 #include <opus.h>
 
 // Audio Tools supplies its own class driver. Older cores use the CUSTOM slot;
@@ -57,6 +58,11 @@ document.addEventListener("DOMContentLoaded",function(){
 )HTML";
 
 audio_tools::USBAudioStream usb;
+constexpr uint32_t kUsbUnityGainQ16 = 65536;
+std::atomic<uint32_t> usbSpeakerLeftGainQ16{kUsbUnityGainQ16};
+std::atomic<uint32_t> usbSpeakerRightGainQ16{kUsbUnityGainQ16};
+std::atomic<uint32_t> usbSpeakerLeftMuted{0};
+std::atomic<uint32_t> usbSpeakerRightMuted{0};
 sos::Playout microphone;
 struct CapturedFrame {
     sos::OpusFrame pcm{};
@@ -66,7 +72,7 @@ sos::SpscRing<CapturedFrame, 8> captured;
 std::atomic<uint32_t> uplinkEpoch{0}, lastUplinkMs{0};
 std::atomic<uint32_t> capturedDrops{0}, sentPackets{0}, receivedPackets{0};
 std::atomic<bool> wifiResetInProgress{false};
-// #region debug-point A-L:audio-path-metrics
+// #region debug-point A-N:audio-path-metrics
 std::atomic<uint32_t> debugMicMin{UINT32_MAX}, debugMicMax{0};
 std::atomic<uint32_t> debugUsbTxMin{UINT32_MAX}, debugUsbTxMax{0};
 std::atomic<uint32_t> debugUsbRxMin{UINT32_MAX}, debugUsbRxMax{0};
@@ -79,6 +85,30 @@ std::atomic<uint32_t> debugOpusErrors{0}, debugOpusBytesMin{UINT32_MAX}, debugOp
 // #endregion
 char identity[64]{}, usbSerial[24]{};
 uint32_t bootSession = 0;
+
+uint32_t usbGainQ16(float volume) {
+    const float bounded = std::max(0.0f, std::min(volume, 1.0f));
+    if (bounded <= 0.0f) return 0;
+    // Audio Tools maps the advertised -100..0 dB UAC range to 0..1.
+    // Convert that control position back to an amplitude gain.
+    const float gain = std::pow(10.0f, (bounded - 1.0f) * 5.0f);
+    return uint32_t(gain * float(kUsbUnityGainQ16) + 0.5f);
+}
+
+void onUsbVolume(float volume, uint8_t channel) {
+    const uint32_t gain = usbGainQ16(volume);
+    if (channel == 0 || channel == 1)
+        usbSpeakerLeftGainQ16.store(gain, std::memory_order_release);
+    if (channel == 0 || channel == 2)
+        usbSpeakerRightGainQ16.store(gain, std::memory_order_release);
+}
+
+void onUsbMute(bool muted, uint8_t channel) {
+    if (channel == 0 || channel == 1)
+        usbSpeakerLeftMuted.store(muted ? 1u : 0u, std::memory_order_release);
+    if (channel == 0 || channel == 2)
+        usbSpeakerRightMuted.store(muted ? 1u : 0u, std::memory_order_release);
+}
 
 struct Peer {
     IPAddress ip;
@@ -100,6 +130,15 @@ void audioTask(void*) {
     uint32_t captureSequence = 0;
     std::array<uint8_t, 192> speakerBytes{};
     std::array<int16_t, 96> micSamples{};
+    int32_t speakerLeftGainQ16 = int32_t(kUsbUnityGainQ16);
+    int32_t speakerRightGainQ16 = int32_t(kUsbUnityGainQ16);
+    auto smoothGain = [](int32_t current, int32_t target) {
+        const int32_t difference = target - current;
+        if (difference == 0) return current;
+        int32_t step = difference / 240; // About 5 ms at 48 kHz.
+        if (step == 0) step = difference > 0 ? 1 : -1;
+        return current + step;
+    };
     for (;;) {
         const bool txActive = usb.mounted() && usb.isStreamingActiveTx();
         const bool rxActive = usb.mounted() && usb.isStreamingActiveRx();
@@ -152,12 +191,26 @@ void audioTask(void*) {
         for (int batch = 0; rxActive && batch < 8 && usb.available() >= 4; ++batch) {
             const size_t bytes = std::min(size_t(usb.available()), speakerBytes.size()) & ~size_t(3);
             const size_t got = usb.readBytes(speakerBytes.data(), bytes);
+            const int32_t targetLeftGainQ16 = usbSpeakerLeftMuted.load(
+                std::memory_order_acquire)
+                ? 0 : int32_t(usbSpeakerLeftGainQ16.load(std::memory_order_acquire));
+            const int32_t targetRightGainQ16 = usbSpeakerRightMuted.load(
+                std::memory_order_acquire)
+                ? 0 : int32_t(usbSpeakerRightGainQ16.load(std::memory_order_acquire));
             for (size_t i = 0; i + 3 < got; i += 4) {
                 const uint16_t l = sos::get16(speakerBytes.data() + i);
                 const uint16_t r = sos::get16(speakerBytes.data() + i + 2);
                 const int32_t left = l < 32768 ? int32_t(l) : int32_t(l) - 65536;
                 const int32_t right = r < 32768 ? int32_t(r) : int32_t(r) - 65536;
-                frame.pcm[frameUsed++] = int16_t((left + right) / 2);
+                speakerLeftGainQ16 = smoothGain(
+                    speakerLeftGainQ16, targetLeftGainQ16);
+                speakerRightGainQ16 = smoothGain(
+                    speakerRightGainQ16, targetRightGainQ16);
+                const int32_t scaledLeft = int32_t(
+                    (int64_t(left) * speakerLeftGainQ16) >> 16);
+                const int32_t scaledRight = int32_t(
+                    (int64_t(right) * speakerRightGainQ16) >> 16);
+                frame.pcm[frameUsed++] = int16_t((scaledLeft + scaledRight) / 2);
                 if (frameUsed == sos::kOpusFrameSamples) {
                     frame.capturedMs = millis();
                     frame.sequence = captureSequence++;
@@ -401,6 +454,7 @@ void networkTask(void*) {
 
 void setup() {
     Serial.begin(115200); // UART bridge, not native USB CDC.
+    audio_tools::AudioToolsLogger.setLogLevel(audio_tools::AudioLogger::Error);
     const uint64_t mac = ESP.getEfuseMac();
     snprintf(usbSerial, sizeof(usbSerial), "%012llX", (unsigned long long)mac);
     snprintf(identity, sizeof(identity), "%s-%s", sos::kDeviceName, usbSerial);
@@ -426,10 +480,28 @@ void setup() {
     config.enable_ep_in_flow_control = true;
     config.fifo_packets = 16;
     config.rx_start_fill_percent = 0;
+    // Host volume controls the phone-playback (USB OUT) path in audioTask.
+    // Enabling this library option would instead scale USB IN microphone data.
     config.volume_active = false;
     config.self_powered = false;
     config.max_power_ma = 250;
     config.begin_usb = true;
+    usb.setReqEntityCallback([](audio_tools::USBAudioDeviceBase* device,
+                                uint8_t,
+                                const audio_tools::UsbSetupPacket& request,
+                                uint8_t*) {
+        const uint8_t entity = audio_tools::u16High(request.wIndex);
+        if (entity != audio_tools::USBAudio2DescriptorBuilder::ENTITY_FU1 ||
+            request.bRequest != audio_tools::kAudioCsReqCur)
+            return true;
+        const uint8_t control = audio_tools::u16High(request.wValue);
+        const uint8_t channel = audio_tools::u16Low(request.wValue);
+        if (control == audio_tools::AUDIO_FU_CTRL_VOLUME)
+            onUsbVolume(device->volume(channel), channel);
+        else if (control == audio_tools::AUDIO_FU_CTRL_MUTE)
+            onUsbMute(device->isMute(channel), channel);
+        return true;
+    });
     if (!usb.begin(config)) {
         Serial.println("USB audio initialization failed");
         return;
@@ -492,10 +564,11 @@ void loop() {
 
     if (uint32_t(now - lastDebugMs) < 5000) return;
     lastDebugMs = now;
-    // #region debug-point A-L:serial-snapshot
-    Serial.printf("[DEBUG] session=audio-crackle-stability run=post-fix-15 hypotheses=A,B,C,D,E,F,G,H,I,J,K,L "
+    // #region debug-point A-N:serial-snapshot
+    Serial.printf("[DEBUG] session=audio-crackle-stability run=post-fix-17 hypotheses=A,B,C,D,E,F,G,H,I,J,K,L,M,N "
         "wifi=%d rssi=%d usb=%d tx=%d rx=%d up=%lu down=%lu under=%lu trim=%lu overflow=%lu drop=%lu "
         "mic=%lu..%lu usbTx=%lu..%lu usbTxPacket=%u usbRx=%lu..%lu "
+        "usbVol=%u/%u usbMute=%u/%u "
         "usbRxDrop=%lu txXfer=%lu rxXfer=%lu "
         "capPeak=%lu sendBatch=%lu frameAgeMax=%lu stale=%lu superseded=%lu upLost=%lu upGap=%lu "
         "upArrivalMax=%lu upSourceMax=%lu "
@@ -512,6 +585,9 @@ void loop() {
         (unsigned long)debugUsbTxMin.exchange(UINT32_MAX), (unsigned long)debugUsbTxMax.exchange(0),
         unsigned(usb.getTxFrameBytesLast()),
         (unsigned long)debugUsbRxMin.exchange(UINT32_MAX), (unsigned long)debugUsbRxMax.exchange(0),
+        unsigned((usbSpeakerLeftGainQ16.load() * 100 + 32768) >> 16),
+        unsigned((usbSpeakerRightGainQ16.load() * 100 + 32768) >> 16),
+        unsigned(usbSpeakerLeftMuted.load()), unsigned(usbSpeakerRightMuted.load()),
         (unsigned long)usb.getRxDroppedBytes(), (unsigned long)usb.getTxXferCount(),
         (unsigned long)usb.getRxXferCount(), (unsigned long)debugCapturePeak.exchange(0),
         (unsigned long)debugSendBatchMax.exchange(0), (unsigned long)debugFrameAgeMax.exchange(0),

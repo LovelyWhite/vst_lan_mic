@@ -196,7 +196,10 @@ python3 python/discover.py --seconds 5 --broadcast 192.168.1.255
 - 面向 Android USB Host 和支持 USB Audio 的 iPhone。USB-C iPhone 使用合适的数据连接；Lightning iPhone 通常需要支持供电的相机转接器。
 - 固件提供 **UAC2**，不是 UAC1。不同 Android 系统、iOS 版本、转接器和应用对双通道 USB 麦克风的支持不同，当前没有实测通过的机型清单。
 - 系统枚举成功不代表所有通话、直播或录音应用都会采用该输入；应用可能强制使用内置麦克风或单声道。
-- USB 音量/静音控制未启用软件处理，音量请通过插件 `Network gain` 或手机应用调整。
+- iOS 发出的 UAC2 播放音量/静音请求会在 USB OUT 进入网络编码前以平滑增益处理，
+  并按 UAC 分贝刻度转换为听感均匀的振幅，因而控制手机返回 DAW 的声音。
+  `Network gain` 只控制 DAW 发往手机麦克风的方向。
+  部分 Android 设备不会发送 UAC Feature Unit 请求，其音量行为由系统或应用决定。
 - 仅可信局域网使用：发现、控制、PCM 和 Opus 均为未认证、未加密 UDP。不要映射端口到公网。
 - 关闭 AP 客户端隔离；允许 DAW 的本地网络访问及防火墙 UDP 通信。VPN、多网卡或访客网络可能影响广播。
 - USB VID/PID 沿用音频库的开发默认值，不代表拥有商业产品 USB 标识授权。

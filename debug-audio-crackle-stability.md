@@ -325,6 +325,47 @@
 - 诊断 runId 改为 `post-fix-15`。通过条件：`opusBytes=480..480/opusErr=0`，
   `udpFail/superseded` 不持续增长，并由实际监听确认杂音消失或明显降低。
 
+## Post-fix Run 15
+- 连续约 5.5 分钟日志保持 `opusBytes=480..480/opusErr=0`，
+  `under/trim/overflow/drop/udpFail/superseded/usbRxDrop` 均为零。
+- Opus 状态放入内部 RAM 后仍有 `minHeap=87180/maxBlock=51188`，
+  `netStackMin=6624`；用户确认此前返回音频杂音已经消失，L 得到实机确认。
+
+## Hypothesis M: iOS UAC Volume Control Is Advertised but Applied to No Audio
+- iOS 会对 Feature Unit 的 master、left、right 发送 `SET_CUR`，日志显示
+  `setVolume ... channel: 0/1/2`；Android 当前未发送这类请求。
+- 描述符始终把音量/静音声明为 host-programmable。`volume_active=false`
+  只禁止库内样本缩放，不会移除控制；因此 iOS 音量状态更新但听感不变。
+- 库内 `setVolume` 还以 Warning 在 USB 控制回调打印，连续调节时串口
+  flush 会阻塞实时 USB 处理，符合“调节时卡顿”现象。
+
+## Fix Iteration 16
+- Audio Tools 日志级别降至 Error，禁止音量/静音控制请求在实时回调逐条输出。
+- 保持库的 `volume_active=false`，避免错误缩放 DAW 到手机的 USB IN 麦克风；
+  实体请求回调只接受 Feature Unit 1（手机播放的 USB OUT 链路），忽略
+  Feature Unit 2（DAW 到手机的 USB IN 麦克风链路）。回调仅更新原子状态，
+  不做串口输出、动态分配或显式加锁；音量在手机播放 USB OUT 下混前处理。
+- master 控制同时更新左右，channel 1/2 分别更新左右，不重复相乘；音频任务
+  使用 Q16 定点增益和约 5 ms 平滑，避免阶跃爆音。
+- 诊断 runId 改为 `post-fix-16`，新增 `usbVol=L/R` 和 `usbMute=L/R`。
+  通过条件：iOS 调节时字段同步变化、DAW 音量生效、无 Warning，且
+  `usbRxDrop/under/udpFail` 不增长。
+
+## Post-fix Run 16
+- 用户确认连续调节 iOS 音量已不再卡顿，说明控制回调日志阻塞问题已解决。
+- 音量变化仍不符合听感刻度，最低档之前音量过大，M 得到部分确认。
+
+## Hypothesis N: Normalized UAC Control Position Is Used as Amplitude
+- Audio Tools 将描述符声明的 `-100..0 dB` 线性映射为 `0..1` 控制位置。
+  例如 `0.72` 表示约 `-28 dB`，对应振幅约 `0.04`，并非 `0.72`。
+- 直接将控制位置作为 PCM 增益会使中低档严重偏响，也会造成调节听感不均匀。
+
+## Fix Iteration 17
+- 将归一化控制位置还原为分贝后，按 `gain = 10^(dB/20)` 转为振幅 Q16；
+  `0.0` 明确映射为零，原有约 5 ms 平滑保持不变。
+- 诊断 runId 改为 `post-fix-17`，`usbVol=L/R` 现在显示实际振幅百分比。
+  通过条件：iOS 音量变化听感均匀，最低档接近静音，静音档完全无声。
+
 ## Opus Memory Placement Override
 - 按当前要求，Opus 编码器状态从 PSRAM 改为显式内部 RAM：
   `MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT`。此前 Post-fix 10 的 PSRAM 分配记录
@@ -347,4 +388,6 @@
   - I: REJECTED AS ROOT
   - J: REJECTED
   - K: CONFIRMED
-  - L: ACTIVE
+  - L: CONFIRMED
+  - M: PARTIALLY CONFIRMED
+  - N: ACTIVE
