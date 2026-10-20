@@ -27,8 +27,14 @@ BridgeProcessor::~BridgeProcessor() {
 }
 
 void BridgeProcessor::parameterChanged(const juce::String&, float value) {
-    // Also release the lease when the DAW has stopped calling processBlock().
-    if (value < 0.5f) network.setEnabled(false);
+    if constexpr (sending) {
+        // Also release the lease when the DAW has stopped calling processBlock().
+        if (value < 0.5f) network.setEnabled(false);
+    } else {
+        // Receiver control-plane activity must not depend on the editor or on
+        // the host feeding an input-silent effect into processBlock().
+        network.setEnabled(value >= 0.5f && !offline_.load());
+    }
 }
 
 void BridgeProcessor::resetSendResampler() {
@@ -79,7 +85,9 @@ void BridgeProcessor::prepareToPlay(double rate, int) {
     dawSampleRateHz_.store(uint32_t(std::lround(dawSampleRate_)));
     sendStep_ = std::max(0.0001, dawSampleRate_ / double(sos::kSampleRate));
     network.setReceiveSampleRate(dawSampleRate_);
-    network.setEnabled(false);
+    const bool offline = isNonRealtime();
+    offline_.store(offline);
+    network.setEnabled(!sending && enabledParam_->load() > 0.5f && !offline);
     network.clearReceive();
     resetSendResampler();
     lastBlockMs_ = 0;
@@ -178,6 +186,8 @@ void BridgeProcessor::setStateInformation(const void* data, int size) {
     if (!state.isValid()) return;
     network.setPreferredDevice(state.getProperty("device").toString());
     parameters.replaceState(state);
+    if constexpr (!sending)
+        network.setEnabled(enabledParam_->load() > 0.5f && !offline_.load());
 }
 
 juce::AudioProcessorEditor* BridgeProcessor::createEditor() { return new BridgeEditor(*this); }

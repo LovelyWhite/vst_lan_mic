@@ -595,10 +595,12 @@ void loop() {
         }
     }
 
-    if (uint32_t(now - lastDebugMs) < 5000) return;
+    const bool usbAudioActive =
+        usb.isStreamingActiveTx() || usb.isStreamingActiveRx();
+    if (usbAudioActive || uint32_t(now - lastDebugMs) < 5000) return;
     lastDebugMs = now;
     // #region debug-point P-Q-R-S:serial-snapshot
-    Serial.printf("[DEBUG] session=daw-phone-stutter run=post-fix hypotheses=P,Q,R,S "
+    Serial.printf("[DEBUG] session=daw-phone-stutter run=post-fix-periodic hypotheses=P,Q,R,S,T,U,V "
         "wifi=%d rssi=%d usb=%d tx=%d rx=%d up=%lu down=%lu under=%lu trim=%lu overflow=%lu drop=%lu "
         "mic=%lu..%lu usbTx=%lu..%lu usbTxPacket=%u usbRx=%lu..%lu "
         "audioLoopGapMax=%lu usbTxGapMax=%lu usbTxAdvanceMax=%lu usbTxDone=%lu..%lu "

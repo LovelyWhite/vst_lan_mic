@@ -63,21 +63,30 @@ public:
                 lost += delta;
                 maxGap = std::max(maxGap, delta);
                 if (delta <= 2) {
-                    // Bridge isolated gaps without the audible fade-to-silence
-                    // dip used for longer interruptions.
+                    // Keep the bridge continuous without drawing a full-scale
+                    // DC ramp between unrelated packet endpoints.
                     const uint32_t bridgeSamples =
                         delta * uint32_t(frame.size());
+                    const uint32_t half = bridgeSamples / 2;
                     const float start = float(lastSample_);
-                    const float change = float(frame.front()) - start;
+                    const float end = float(frame.front());
                     Frame scratch{};
                     for (uint32_t missing = 0; missing < delta; ++missing) {
                         for (size_t i = 0; i < scratch.size(); ++i) {
                             const uint32_t position =
                                 missing * uint32_t(scratch.size()) +
                                 uint32_t(i) + 1;
-                            scratch[i] = int16_t(start + change *
-                                (float(position) /
-                                 float(bridgeSamples + 1)));
+                            if (position <= half) {
+                                const float t = float(position) / float(half);
+                                const float smooth = t * t * (3.0f - 2.0f * t);
+                                scratch[i] = int16_t(start * (1.0f - smooth));
+                            } else {
+                                const float t =
+                                    float(position - half) /
+                                    float(bridgeSamples - half);
+                                const float smooth = t * t * (3.0f - 2.0f * t);
+                                scratch[i] = int16_t(end * smooth);
+                            }
                         }
                         sink(scratch);
                     }

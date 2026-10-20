@@ -231,11 +231,12 @@ void Transport::run() {
                 resetReceiveState();
                 invalidateAudio();
             }
-            if (uint32_t(now - lastInterfaceRefresh) >= 5000) {
+            if (peerIp.isEmpty() &&
+                uint32_t(now - lastInterfaceRefresh) >= 5000) {
                 lastInterfaceRefresh = now;
                 rebuildDiscoveryEndpoints();
             }
-            if (uint32_t(now - lastDiscover) >= 1000) {
+            if (peerIp.isEmpty() && uint32_t(now - lastDiscover) >= 1000) {
                 lastDiscover = now;
                 // Windows cannot obtain directed broadcasts through JUCE 8.0.6.
                 // A socket bound to each local address forces limited broadcast

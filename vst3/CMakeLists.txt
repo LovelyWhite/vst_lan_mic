@@ -43,6 +43,13 @@ if(SOS_VST3_DIR)
 endif()
 
 function(add_bridge_plugin target code sending)
+    if(sending)
+        set(sos_vst3_categories Fx Network)
+    else()
+        # The receiver produces audio without an input signal, so hosts must
+        # keep processing it like a generator even while the track is silent.
+        set(sos_vst3_categories Fx Generator Network)
+    endif()
     juce_add_plugin(${target}
         COMPANY_NAME "SUXITECH"
         BUNDLE_ID "cn.suxitech.${target}"
@@ -55,7 +62,7 @@ function(add_bridge_plugin target code sending)
         NEEDS_MIDI_OUTPUT FALSE
         IS_MIDI_EFFECT FALSE
         ${sos_copy_args}
-        VST3_CATEGORIES Fx Network)
+        VST3_CATEGORIES ${sos_vst3_categories})
     target_sources(${target} PRIVATE
         src/PluginProcessor.cpp src/PluginEditor.cpp src/Transport.cpp)
     target_include_directories(${target} PRIVATE src ../common)
