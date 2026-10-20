@@ -1,4 +1,4 @@
-# SUXITECH LAN MIC
+# LAN MIC
 
 ## 项目目标
 
@@ -9,7 +9,8 @@
 - ESP32-S3 枚举为 USB 立体声耳麦（USB IN 麦克风 + USB OUT 播放）
 - 上行链路：电脑 → ESP32 → 手机麦克风
 - 下行链路：手机播放 → ESP32 → 电脑 DAW
-- 两个 VST3 插件：`vst2esp`（发送）和 `esp2vst`（接收）
+- 两个 VST3 插件：`LAN MIC Send`（发送，构建目标 `lan_mic_send`）和
+  `LAN MIC Return`（接收，构建目标 `lan_mic_return`）
 - 无需固定 IP，自动发现 ESP32 设备
 - 网络与 USB 固定 48 kHz，VST 自动转换 DAW 工程采样率；单声道网络处理，立体声 USB 接口
 - 使用 `arduino-audio-tools` 库实现音频处理
@@ -35,8 +36,8 @@
 当前交付为源码，尚未编译、刷机、加载 DAW 或验证手机兼容性。
 
 ```text
-DAW -> vst2esp -> Wi-Fi UDP -> ESP32-S3 -> USB IN -> 手机麦克风
-DAW <- esp2vst <- Wi-Fi UDP <- ESP32-S3 <- USB OUT <- 手机播放
+DAW -> LAN MIC Send -> Wi-Fi UDP -> ESP32-S3 -> USB IN -> 手机麦克风
+DAW <- LAN MIC Return <- Wi-Fi UDP <- ESP32-S3 <- USB OUT <- 手机播放
 ```
 
 - 网络与 USB 固定 48 kHz，VST 自动转换 DAW 工程采样率；网络单声道，
@@ -49,7 +50,7 @@ DAW <- esp2vst <- Wi-Fi UDP <- ESP32-S3 <- USB OUT <- 手机播放
 - 广播发现，单播订阅与音频传输；每个插件使用系统分配的本地端口，不抢占固定电脑端口。
 - 每台 ESP32 同时接受一个发送插件和一个接收插件，两个方向可以独立使用。
 - 插件支持设备选择、增益、启停、状态统计和工程内配置保存。
-- `esp2vst` 声明为可自主产生输出的 VST3 Generator，并在处理器准备和工程状态
+- `LAN MIC Return` 声明为可自主产生输出的 VST3 Generator，并在处理器准备和工程状态
   恢复阶段启动接收租约；无需先打开插件编辑器即可接收手机音频。
 - 固件通过 `arduino-audio-tools` 的 `USBAudioStream` 提供 USB Audio Class 2。
 
@@ -72,10 +73,10 @@ DAW <- esp2vst <- Wi-Fi UDP <- ESP32-S3 <- USB OUT <- 手机播放
 固件使用手机网页配网，不再读取或编译 `WifiConfig.h`：
 
 1. 首次启动、没有已保存凭据或连接失败时，ESP32 创建名为
-   `SUXITECH-LAN-MIC-<设备编号>` 的开放热点，无需密码。
+   `LAN MIC-<设备编号>` 的开放热点，无需密码。
 2. 手机连接该热点后使用自动弹出的配网页面选择 2.4 GHz Wi-Fi 并输入密码；
    未自动弹出时访问 `http://192.168.4.1`。
-   配网页面使用 `SUXITECH LAN MIC` 白色主题，直接进入 Wi-Fi 扫描和密码输入，
+   配网页面使用 `LAN MIC` 白色主题，直接进入 Wi-Fi 扫描和密码输入，
    不显示首页菜单、返回、退出、ESP 芯片信息、固件更新或网页清除按钮。
 3. 未连接 Wi-Fi 时，设备会一直保持配网热点和页面，不再自动超时。
    配置成功后凭据保存到 ESP32 NVS，后续启动自动连接。
@@ -138,8 +139,8 @@ cmake --build --preset release
 产物分别位于：
 
 ```text
-vst3/build/vst2esp_artefacts/Release/VST3/vst2esp.vst3
-vst3/build/esp2vst_artefacts/Release/VST3/esp2vst.vst3
+vst3/build/lan_mic_send_artefacts/Release/VST3/LAN MIC Send.vst3
+vst3/build/lan_mic_return_artefacts/Release/VST3/LAN MIC Return.vst3
 ```
 
 构建成功后，两个 bundle 会自动复制到 DAW 的插件搜索目录：
@@ -148,7 +149,8 @@ vst3/build/esp2vst_artefacts/Release/VST3/esp2vst.vst3
 - Windows：`C:\Program Files\Common Files\VST3`
 
 这一步由 JUCE 的 `COPY_PLUGIN_AFTER_BUILD` 完成，目标目录不存在时会由 CMake 创建，
-无需手动拷贝。随后在 Studio One 重新扫描插件即可看到 `vst2esp` 和 `esp2vst`。
+无需手动拷贝。随后在 Studio One 重新扫描插件即可看到 `LAN MIC Send` 和
+`LAN MIC Return`。
 
 注意事项：
 
@@ -157,9 +159,12 @@ vst3/build/esp2vst_artefacts/Release/VST3/esp2vst.vst3
   或改用自定义目录：`cmake --preset release -DSOS_VST3_DIR="D:/VST3"`。
   自定义目录同样会替换 macOS 的默认位置。
 - 覆盖已被 DAW 加载的 bundle 可能失败。构建前先在 Studio One 中关闭工程或卸载插件。
+- 首次改用新名称时，手动删除插件目录中遗留的旧版 bundle，避免 Studio One
+  同时显示新旧插件。Windows 还需要在 Studio One 中重新扫描插件；新插件使用
+  独立的 VST3 Class ID，不会与历史缓存中的插件类冲突。
 - 两个 bundle 的路径固定为
-  `vst3/build/vst2esp_artefacts/Release/VST3/vst2esp.vst3` 与
-  `vst3/build/esp2vst_artefacts/Release/VST3/esp2vst.vst3`，也可手动拷贝。
+  `vst3/build/lan_mic_send_artefacts/Release/VST3/LAN MIC Send.vst3` 与
+  `vst3/build/lan_mic_return_artefacts/Release/VST3/LAN MIC Return.vst3`，也可手动拷贝。
 - Windows 自动发现会为每个有效 IPv4 地址绑定独立 UDP socket，避免广播被 VPN、
   虚拟网卡或错误的默认路由截走。搜索状态中的数字是成功绑定的接口数量。
 - Windows 网络应设为“专用”，并允许 Studio One 在专用网络通过 Windows Defender
@@ -168,16 +173,16 @@ vst3/build/esp2vst_artefacts/Release/VST3/esp2vst.vst3
 
 ### 4. Studio One 路由
 
-1. DAW 工程可使用 44.1、48、88.2、96 kHz 等采样率。`vst2esp` 自动转换到
-   网络 48 kHz，`esp2vst` 自动从网络 48 kHz 转回工程采样率。
+1. DAW 工程可使用 44.1、48、88.2、96 kHz 等采样率。`LAN MIC Send` 自动转换到
+   网络 48 kHz，`LAN MIC Return` 自动从网络 48 kHz 转回工程采样率。
    DAW 向插件提供浮点音频，工程位深无需设为 16-bit；网络边界始终量化为 PCM16。
-2. 在要发给手机的音轨或总线上插入 `vst2esp`。插件始终保留本地原始声音，
+2. 在要发给手机的音轨或总线上插入 `LAN MIC Send`。插件始终保留本地原始声音，
    `Network gain` 只调整发送到手机的音量。
-3. 在独立的、启用监听且持续处理的音轨或总线上插入 `esp2vst`。它用手机回传声音替换输入，
+3. 在独立的、启用监听且持续处理的音轨或总线上插入 `LAN MIC Return`。它用手机回传声音替换输入，
    不与输入混音，也不需要先打开插件编辑器来启动网络。
 4. 两个插件选择同一台设备。默认各自选择最先发现的设备；多设备环境应显式选择相同设备身份。
 5. 手机上选择外置 USB 麦克风/耳麦，并在目标应用内授权录音或选择输入输出。
-6. 不要将 `esp2vst` 的返回总线重新送进 `vst2esp`，除非明确需要环回，否则可能产生啸叫。
+6. 不要将 `LAN MIC Return` 的返回总线重新送进 `LAN MIC Send`，除非明确需要环回，否则可能产生啸叫。
 
 设备被占用时，停止另一实例的网络功能或关闭实例，等待约 3.5 秒租约释放。
 DAW 离线导出时网络音频禁用；需要导出的手机声音应先实时录制为音频文件。

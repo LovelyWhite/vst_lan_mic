@@ -1,4 +1,4 @@
-"""Discover SUXITECH LAN MIC devices without reserving either audio direction."""
+"""Discover LAN MIC devices without reserving either audio direction."""
 
 import argparse
 import socket

@@ -40,7 +40,7 @@ form[action="/"]{display:none!important}
 </style>
 <script>
 document.addEventListener("DOMContentLoaded",function(){
-  document.title="SUXITECH LAN MIC";
+  document.title="LAN MIC";
   if(location.pathname==="/"){
     location.replace("/wifi");
     return;
@@ -50,7 +50,7 @@ document.addEventListener("DOMContentLoaded",function(){
   while(node=walker.nextNode())nodes.push(node);
   nodes.forEach(function(n){
     n.nodeValue=n.nodeValue
-      .replace(/WiFiManager/g,"SUXITECH LAN MIC")
+      .replace(/WiFiManager/g,"LAN MIC")
       .replace(/ESP(?:32|8266)?/g,"LAN MIC");
   });
 });
@@ -490,20 +490,21 @@ void setup() {
     audio_tools::AudioToolsLogger.setLogLevel(audio_tools::AudioLogger::Error);
     const uint64_t mac = ESP.getEfuseMac();
     snprintf(usbSerial, sizeof(usbSerial), "%012llX", (unsigned long long)mac);
-    snprintf(identity, sizeof(identity), "%s-%s", sos::kDeviceName, usbSerial);
+    char deviceNumber[7]{};
+    snprintf(deviceNumber, sizeof(deviceNumber), "%06llX",
+             (unsigned long long)(mac & 0xFFFFFFULL));
+    snprintf(identity, sizeof(identity), "%s-%s", sos::kDeviceName, deviceNumber);
     bootSession = esp_random();
     if (!bootSession) bootSession = 1;
     char provisioningSsid[33]{};
-    snprintf(provisioningSsid, sizeof(provisioningSsid),
-             "SUXITECH-LAN-MIC-%06llX",
-             (unsigned long long)(mac & 0xFFFFFFULL));
+    snprintf(provisioningSsid, sizeof(provisioningSsid), "%s", identity);
 
     audio_tools::USBAudioConfig config;
     config.sample_rate = sos::kSampleRate;
     config.channels = 2;
     config.bits_per_sample = 16;
-    config.product = sos::kDeviceName;
-    config.manufacturer = "SUXITECH";
+    config.product = identity;
+    config.manufacturer = "suxitech";
     config.serial = usbSerial;
     config.enable_ep_in = config.enable_ep_out = true;
     config.enable_feedback_ep = false;

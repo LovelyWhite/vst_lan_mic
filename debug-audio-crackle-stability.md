@@ -8,7 +8,7 @@
 
 ## Reproduction Steps
 1. ESP32-S3 启动并连接 Wi-Fi。
-2. 手机打开双向 USB Audio 流，DAW 同时运行 `vst2esp` 与 `esp2vst`。
+2. 手机打开双向 USB Audio 流，DAW 同时运行 `LAN MIC Send` 与 `LAN MIC Return`。
 3. 连续传输约 2 分钟，监听爆音并保存 UART 输出。
 
 ## Hypotheses & Verification
@@ -122,7 +122,7 @@
 ## Fix Iteration 5
 - 协议帧长从 480/10 ms 调整为 672/14 ms，双向包率由 100 降至约 71.4 包/秒；
   应用数据报 1372 字节，连同 IP/UDP 头仍低于 1500 MTU。
-- 协议版本升级；固件、`vst2esp`、`esp2vst` 必须一起重建。
+- 协议版本升级；固件、`LAN MIC Send`、`LAN MIC Return` 必须一起重建。
 - VST 发送线程改为按 14 ms 节奏每轮最多发送一帧；积压时跳到最新帧，不再成批追赶。
 - 播放缓冲继续按约 300 ms 计算，不随帧长改变而意外增加。
 - 新增 Wi-Fi RSSI 字段，用于区分发送资源压力与弱信号重传。
@@ -201,7 +201,7 @@
   使用裸 Opus packet，不增加 Ogg 容器。
 - Opus 编码器状态显式分配到 8 MB PSRAM，释放内部 RAM 给 Wi-Fi/lwIP；
   恢复默认动态 Wi-Fi TX buffer，不再使用 48 buffer 链接器包装。
-- `esp2vst` 使用独立 Opus 解码器；短序号缺口调用 PLC，最多补偿 15 帧/300 ms，
+- `LAN MIC Return` 使用独立 Opus 解码器；短序号缺口调用 PLC，最多补偿 15 帧/300 ms，
   大缺口和重连、超时、启停、设备切换都会重置解码器状态。
 - 新增 `opusBytes` 和 `opusErr`，诊断 runId 改为 `post-fix-10`。
 - 通过条件：`opusErr=0`，CBR 包通常约 240 字节；稳态

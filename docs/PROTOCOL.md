@@ -45,7 +45,10 @@ Discover、Subscribe、Ack 无负载。接收方拒绝错误版本、采样率�
    网卡端点重建，仅保留单播订阅续约；租约失效后立即恢复发现。Windows 上
    JUCE 8.0.6 无法提供接口定向广播地址，因此各绑定 socket 发送 limited
    broadcast，避免 VPN、虚拟网卡或多网卡让发现包只从错误接口发出。
-3. 固件单播 Offer 回请求来源端口，payload 为 `vst_lan_mic-<eFuse MAC>`，session 为本次开机随机 ID。
+3. 固件单播 Offer 回请求来源端口，payload 为 `LAN MIC-XXXXXX`；`XXXXXX`
+   是 eFuse MAC 后 6 位大写十六进制，与 USB 产品名和配网热点编号一致，
+   session 为本次开机随机 ID。插件可从带 6 位或 12 位十六进制后缀的历史
+   Offer 中提取末 6 位并规范化显示，允许固件与插件分步升级。
 4. 插件自动选择最先发现的设备，或选择用户指定身份。DHCP 地址不保存在工程中。
 5. 插件每秒向选中设备 45678 发送 Subscribe，flags 为 Sender 或 Receiver，session 为插件实例随机 ID。
 6. 固件每方向独立维护 `源 IP + 源端口 + 插件 session` 租约。未占用或原持有者续约时返回 Ack；冲突时 Ack 追加 Busy。

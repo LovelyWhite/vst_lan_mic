@@ -23,7 +23,7 @@ constexpr size_t kFrameBytes = kFrameSamples * 2;
 constexpr size_t kMaxPacketSize = kHeaderSize + kFrameBytes;
 constexpr uint32_t kLeaseMs = 3500;
 constexpr uint32_t kAudioTimeoutMs = 500;
-constexpr const char* kDeviceName = "vst_lan_mic";
+constexpr const char* kDeviceName = "LAN MIC";
 
 enum class Kind : uint8_t {
     Discover = 1, Offer = 2, Subscribe = 3, Ack = 4, Audio = 5, AudioOpus = 6

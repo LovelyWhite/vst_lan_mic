@@ -6,7 +6,7 @@
 - **Evidence Directory**: `/tmp/trae-debug-vst_lan_mic-daw-phone-stutter`（本轮使用现有本地日志路径，不启用 HTTP）
 
 ## Reproduction Steps
-1. 同时保持 `vst2esp`、ESP32 USB Audio 和手机音频链路工作。
+1. 同时保持 `LAN MIC Send`、ESP32 USB Audio 和手机音频链路工作。
 2. 连续播放 DAW 音频，等待偶发短暂卡顿。
 3. 保存包含卡顿前后诊断快照的 ESP32 串口日志。
 

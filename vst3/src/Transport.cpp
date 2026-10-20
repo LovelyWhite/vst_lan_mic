@@ -8,11 +8,21 @@ uint32_t makeSession() {
     return n == 0 ? 1 : n;
 }
 uint32_t nowMs() { return juce::Time::getMillisecondCounter(); }
+juce::String normalizedDeviceIdentity(const juce::String& value) {
+    const int separator = value.lastIndexOfChar('-');
+    if (separator < 0) return {};
+    auto number = value.substring(separator + 1).toUpperCase();
+    if ((number.length() != 6 && number.length() != 12) ||
+        !number.containsOnly("0123456789ABCDEF"))
+        return {};
+    number = number.substring(number.length() - 6);
+    return juce::String(sos::kDeviceName) + "-" + number;
+}
 constexpr uint32_t kMaxPlcFrames = 300 / sos::kOpusFrameDurationMs;
 }
 
 Transport::Transport(bool sending)
-    : Thread(sending ? "vst2esp network" : "esp2vst network"),
+    : Thread(sending ? "LAN MIC Send network" : "LAN MIC Return network"),
       sending_(sending), session_(makeSession()) {
     startThread();
 }
@@ -25,7 +35,8 @@ Transport::~Transport() {
 
 void Transport::setPreferredDevice(const juce::String& value) {
     const juce::ScopedLock lock(settingsLock_);
-    const auto cleaned = value.trim().substring(0, 64);
+    const auto candidate = value.trim().substring(0, 64);
+    const auto cleaned = normalizedDeviceIdentity(candidate);
     if (preferred_ == cleaned) return;
     preferred_ = cleaned;
     ++preferenceVersion_;
@@ -172,13 +183,11 @@ void Transport::run() {
                                uint32_t now) {
             if (h.kind != sos::Kind::Offer || port != sos::kDiscoveryPort)
                 return false;
-            const auto identity = juce::String::fromUTF8(
+            const auto rawIdentity = juce::String::fromUTF8(
                 reinterpret_cast<const char*>(packet.data() + sos::kHeaderSize),
                 h.payloadBytes);
-            if (!identity.startsWith("vst_lan_mic-") ||
-                !identity.containsOnly(
-                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"))
-                return true;
+            const auto identity = normalizedDeviceIdentity(rawIdentity);
+            if (identity.isEmpty()) return true;
             {
                 const juce::ScopedLock lock(settingsLock_);
                 auto found = std::find_if(devices_.begin(), devices_.end(),

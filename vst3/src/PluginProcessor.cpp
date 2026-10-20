@@ -15,7 +15,7 @@ BridgeProcessor::BridgeProcessor()
     : AudioProcessor(BusesProperties()
           .withInput("Input", juce::AudioChannelSet::stereo(), true)
           .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
-      parameters(*this, nullptr, "SUXITECH LAN MIC", makeParameters()) {
+      parameters(*this, nullptr, "LAN MIC", makeParameters()) {
     gainParam_ = parameters.getRawParameterValue("gain");
     enabledParam_ = parameters.getRawParameterValue("enabled");
     parameters.addParameterListener("enabled", this);

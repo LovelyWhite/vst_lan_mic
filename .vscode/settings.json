@@ -67,6 +67,8 @@
     "stdexcept": "cpp",
     "streambuf": "cpp",
     "typeindex": "cpp",
-    "variant": "cpp"
+    "variant": "cpp",
+    "functional": "cpp",
+    "iterator": "cpp"
   }
 }

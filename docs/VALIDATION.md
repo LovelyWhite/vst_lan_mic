@@ -8,11 +8,14 @@
 - [ ] 确认固件没有打印 `Opus encoder initialization failed`，且 Opus 编码器状态
       成功分配到内部 RAM；记录启动后的 `minHeap` 和 `maxBlock`。
 - [ ] macOS Release、macOS Universal、Windows MSVC 分别完成两个 VST3 目标构建。
-- [ ] 构建后 `vst2esp.vst3`、`esp2vst.vst3` 自动出现在 VST3 插件目录，Studio One 重新扫描后能加载。
+- [ ] 构建后 `LAN MIC Send.vst3`、`LAN MIC Return.vst3` 自动出现在 VST3
+      插件目录，Studio One 重新扫描后能加载。
+- [ ] Windows 删除旧版 bundle 并重新扫描后，只显示新插件；两个插件使用新的
+      VST3 Class ID，打开后均能发现 `LAN MIC-XXXXXX`。
 - [ ] 验证 Universal bundle 确实包含 arm64 和 x86_64；Windows 产物在对应架构 DAW 中扫描成功。
-- [ ] 清除 NVS 后启动，无密码连接 `SUXITECH-LAN-MIC-<设备编号>` 开放热点，
+- [ ] 清除 NVS 后启动，无密码连接 `LAN MIC-<设备编号>` 开放热点，
       并从自动弹页或 `192.168.4.1` 完成 2.4 GHz Wi-Fi 配置。
-- [ ] 配网页面显示 `SUXITECH LAN MIC` 白色主题并直接进入 Wi-Fi 选择，
+- [ ] 配网页面显示 `LAN MIC` 白色主题并直接进入 Wi-Fi 选择，
       不出现首页菜单、返回、退出、ESP 芯片信息、固件更新或网页清除入口。
 - [ ] 不选择 Wi-Fi 时配网热点持续存在且页面不超时；保存有效凭据后才退出配网。
 - [ ] 重启后设备直接使用 NVS 凭据连接；运行时长按 BOOT 约 3 秒并松开后，
@@ -20,6 +23,8 @@
 - [ ] UART 日志打印 Wi-Fi 地址和设备身份，没有 USB 初始化或任务创建失败。
 - [ ] Windows Studio One 中搜索状态显示至少 `1 IPv4 interface(s)`；同时启用
       Wi-Fi、以太网、VPN 或虚拟网卡时，仍能从 ESP32 所在接口发现设备。
+- [ ] USB 音频设备、配网热点和 DAW 设备列表均显示 `LAN MIC-XXXXXX`，且三处
+      `XXXXXX` 完全一致。
 - [ ] Windows 网络配置为“专用”，Windows Defender 防火墙允许 Studio One 在
       专用网络收发 UDP；禁用 VPN 后的结果也记录在案。
 - [ ] 双向流开启后 `usbTxPacket=192`；若为 196，USB IN 会按 49 kHz 消耗并周期欠载。
@@ -29,9 +34,9 @@
 
 ## 单向与双向音频
 
-- [ ] DAW 轨道发送低电平测试信号，经 `vst2esp` 被手机录音应用录到。
-- [ ] 仅打开 `esp2vst`，手机播放能进入 DAW，不需要启动发送插件。
-- [ ] 保存并关闭工程后重新打开，不打开 `esp2vst` 编辑器也能自动连接并收到手机音频；
+- [ ] DAW 轨道发送低电平测试信号，经 `LAN MIC Send` 被手机录音应用录到。
+- [ ] 仅打开 `LAN MIC Return`，手机播放能进入 DAW，不需要启动发送插件。
+- [ ] 保存并关闭工程后重新打开，不打开 `LAN MIC Return` 编辑器也能自动连接并收到手机音频；
       无输入信号时宿主仍持续调用接收插件生成输出。
 - [ ] 左右声道分别发送信号，确认平均下混和双通道复制符合预期，无左右通道错位。
 - [ ] 持续启用双向传输至少 30 分钟，记录欠载、丢包、裁剪计数和听感。

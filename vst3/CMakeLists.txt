@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(SUXITECH_LAN_MIC_VST3 VERSION 0.1.0 LANGUAGES C CXX)
+project(LAN_MIC_VST3 VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -42,7 +42,7 @@ if(SOS_VST3_DIR)
     list(APPEND sos_copy_args VST3_COPY_DIR "${SOS_VST3_DIR}")
 endif()
 
-function(add_bridge_plugin target code sending)
+function(add_bridge_plugin target code sending product_name bundle_id)
     if(sending)
         set(sos_vst3_categories Fx Network)
     else()
@@ -51,11 +51,11 @@ function(add_bridge_plugin target code sending)
         set(sos_vst3_categories Fx Generator Network)
     endif()
     juce_add_plugin(${target}
-        COMPANY_NAME "SUXITECH"
-        BUNDLE_ID "cn.suxitech.${target}"
+        COMPANY_NAME "suxitech"
+        BUNDLE_ID "${bundle_id}"
         PLUGIN_MANUFACTURER_CODE SoSu
         PLUGIN_CODE ${code}
-        PRODUCT_NAME "${target}"
+        PRODUCT_NAME "${product_name}"
         FORMATS VST3
         IS_SYNTH FALSE
         NEEDS_MIDI_INPUT FALSE
@@ -76,5 +76,5 @@ function(add_bridge_plugin target code sending)
         PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 endfunction()
 
-add_bridge_plugin(vst2esp V2Es 1)
-add_bridge_plugin(esp2vst E2Vs 0)
+add_bridge_plugin(lan_mic_send LmSd 1 "LAN MIC Send" "cn.suxitech.lanmic.send")
+add_bridge_plugin(lan_mic_return LmRt 0 "LAN MIC Return" "cn.suxitech.lanmic.return")
