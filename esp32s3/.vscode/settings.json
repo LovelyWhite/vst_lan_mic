@@ -2,6 +2,7 @@
   "files.associations": {
     "*.wxml": "wxml",
     "istream": "cpp",
-    "ostream": "cpp"
+    "ostream": "cpp",
+    "bitset": "cpp"
   }
 }

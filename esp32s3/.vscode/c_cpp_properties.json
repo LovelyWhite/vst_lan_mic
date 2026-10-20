@@ -8,7 +8,6 @@
         {
             "name": "PlatformIO",
             "includePath": [
-                "/Users/lw/work/vst_lan_mic/esp32s3/include",
                 "/Users/lw/work/vst_lan_mic/esp32s3/src",
                 "/Users/lw/work/vst_lan_mic/esp32s3/.pio/libdeps/esp32-s3-devkitc-1/WiFiManager",
                 "/Users/lw/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
@@ -23,6 +22,7 @@
                 "/Users/lw/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                 "/Users/lw/.platformio/packages/framework-arduinoespressif32/libraries/Network/src",
                 "/Users/lw/work/vst_lan_mic/common",
+                "/Users/lw/work/vst_lan_mic/esp32s3/include",
                 "/Users/lw/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/newlib/platform_include",
                 "/Users/lw/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/freertos/config/include",
                 "/Users/lw/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/freertos/config/include/freertos",
@@ -459,7 +459,6 @@
             "browse": {
                 "limitSymbolsToIncludedHeaders": true,
                 "path": [
-                    "/Users/lw/work/vst_lan_mic/esp32s3/include",
                     "/Users/lw/work/vst_lan_mic/esp32s3/src",
                     "/Users/lw/work/vst_lan_mic/esp32s3/.pio/libdeps/esp32-s3-devkitc-1/WiFiManager",
                     "/Users/lw/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src",
@@ -474,6 +473,7 @@
                     "/Users/lw/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src",
                     "/Users/lw/.platformio/packages/framework-arduinoespressif32/libraries/Network/src",
                     "/Users/lw/work/vst_lan_mic/common",
+                    "/Users/lw/work/vst_lan_mic/esp32s3/include",
                     "/Users/lw/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/newlib/platform_include",
                     "/Users/lw/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/freertos/config/include",
                     "/Users/lw/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/freertos/config/include/freertos",
@@ -917,6 +917,7 @@
                 "ARDUINO_USB_CDC_ON_BOOT=0",
                 "BOARD_HAS_PSRAM",
                 "CORE_DEBUG_LEVEL=0",
+                "WM_STRINGS_FILE=\"my_strings_en.h\"",
                 "CJSON_CIRCULAR_LIMIT=10000",
                 "CJSON_NESTING_LIMIT=1000",
                 "ESP32_ARDUINO_LIB_BUILDER",

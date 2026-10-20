@@ -26,36 +26,6 @@
 namespace {
 constexpr uint8_t kWifiResetPin = 0;
 constexpr uint32_t kWifiResetHoldMs = 3000;
-constexpr char kProvisioningHead[] = R"HTML(
-<style>
-:root{color-scheme:light}
-body{background:#f5f7f8!important;color:#263238!important;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important}
-.wrap{max-width:460px!important;padding:24px!important}
-h1{color:#168f81!important;letter-spacing:.04em}
-h3{color:#607d80!important}
-button{background:#168f81!important;color:#fff!important;border:0!important;border-radius:10px!important;font-weight:600!important}
-input,select{background:#fff!important;color:#263238!important;border:1px solid #b8c9cc!important;border-radius:8px!important}
-a{color:#13776d!important}
-form[action="/"]{display:none!important}
-</style>
-<script>
-document.addEventListener("DOMContentLoaded",function(){
-  document.title="LAN MIC";
-  if(location.pathname==="/"){
-    location.replace("/wifi");
-    return;
-  }
-  var walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
-  var nodes=[],node;
-  while(node=walker.nextNode())nodes.push(node);
-  nodes.forEach(function(n){
-    n.nodeValue=n.nodeValue
-      .replace(/WiFiManager/g,"LAN MIC")
-      .replace(/ESP(?:32|8266)?/g,"LAN MIC");
-  });
-});
-</script>
-)HTML";
 
 audio_tools::USBAudioStream usb;
 constexpr uint32_t kUsbUnityGainQ16 = 65536;
@@ -543,12 +513,16 @@ void setup() {
     pinMode(kWifiResetPin, INPUT_PULLUP);
     WiFiManager wifiManager;
     wifiManager.setDebugOutput(false);
-    wifiManager.setConnectTimeout(15);
+    wifiManager.setConnectTimeout(6);
     wifiManager.setConfigPortalTimeout(0);
-    wifiManager.setCustomHeadElement(kProvisioningHead);
-    wifiManager.setShowStaticFields(false);
-    wifiManager.setShowDnsFields(false);
-    wifiManager.setShowInfoErase(false);
+    wifiManager.setShowInfoUpdate(false);
+    wifiManager.setTitle("LAN MIC");
+    wifiManager.setWebServerCallback([&]() {
+    wifiManager.server->on("/", [&]() {
+        wifiManager.server->sendHeader("Location", "/wifi", true);
+        wifiManager.server->send(302, "text/plain", "");
+      });
+    });
     Serial.printf("Open Wi-Fi provisioning AP: %s\n", provisioningSsid);
     if (!wifiManager.autoConnect(provisioningSsid)) {
         Serial.println("Wi-Fi provisioning failed to start; rebooting");
