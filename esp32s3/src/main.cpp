@@ -35,7 +35,7 @@ std::atomic<uint32_t> usbSpeakerLeftGainQ16{kUsbUnityGainQ16};
 std::atomic<uint32_t> usbSpeakerRightGainQ16{kUsbUnityGainQ16};
 std::atomic<uint32_t> usbSpeakerLeftMuted{0};
 std::atomic<uint32_t> usbSpeakerRightMuted{0};
-sos::Playout microphone;
+sos::MonoPlayout microphone; // Uplink (DAW -> phone) stays mono.
 struct CapturedFrame {
     sos::OpusFrame pcm{};
     uint32_t capturedMs = 0, sequence = 0;
@@ -132,7 +132,8 @@ struct Peer {
 void audioTask(void*) {
     uint32_t epoch = uplinkEpoch.load();
     bool txWasActive = false, rxWasActive = false, uplinkWasFresh = false;
-    CapturedFrame frame;
+    // Stereo frames doubled the buffer; keeping it off the 8 KB task stack.
+    static CapturedFrame frame;
     size_t frameUsed = 0;
     uint32_t captureSequence = 0;
     std::array<uint8_t, 192> speakerBytes{};
@@ -246,8 +247,11 @@ void audioTask(void*) {
                     (int64_t(left) * speakerLeftGainQ16) >> 16);
                 const int32_t scaledRight = int32_t(
                     (int64_t(right) * speakerRightGainQ16) >> 16);
-                frame.pcm[frameUsed++] = int16_t((scaledLeft + scaledRight) / 2);
-                if (frameUsed == sos::kOpusFrameSamples) {
+                // True stereo downlink: keep the L/R separation the phone sent
+                // instead of folding both channels into one averaged sample.
+                frame.pcm[frameUsed++] = int16_t(scaledLeft);
+                frame.pcm[frameUsed++] = int16_t(scaledRight);
+                if (frameUsed == frame.pcm.size()) {
                     frame.capturedMs = millis();
                     frame.sequence = captureSequence++;
                     if (!captured.push(&frame, 1)) ++capturedDrops;
@@ -271,7 +275,7 @@ void networkTask(void*) {
     CapturedFrame pendingDownlink;
     IPAddress boundIp;
     std::array<uint8_t, sos::kMaxPacketSize + 1> packet{};
-    const int opusEncoderBytes = opus_encoder_get_size(1);
+    const int opusEncoderBytes = opus_encoder_get_size(sos::kOpusChannels);
     // The encoder state is private to this task; keep it in PSRAM so the
     // Wi-Fi/lwIP internal heap is not reduced by the encoder footprint.
     void* opusMemory = opusEncoderBytes > 0
@@ -279,7 +283,8 @@ void networkTask(void*) {
         : nullptr;
     auto* opusEncoder = static_cast<OpusEncoder*>(opusMemory);
     int opusStatus = opusEncoder
-        ? opus_encoder_init(opusEncoder, sos::kSampleRate, 1, OPUS_APPLICATION_AUDIO)
+        ? opus_encoder_init(opusEncoder, sos::kSampleRate, sos::kOpusChannels,
+                            OPUS_APPLICATION_AUDIO)
         : OPUS_ALLOC_FAIL;
     if (opusStatus == OPUS_OK)
         opusStatus = opus_encoder_ctl(opusEncoder, OPUS_SET_BITRATE(sos::kOpusBitrate));
@@ -680,7 +685,7 @@ void loop() {
         (unsigned long)debugOpusBytesMin.exchange(UINT32_MAX),
         (unsigned long)debugOpusBytesMax.exchange(0), (unsigned long)debugOpusErrors.load(),
         (unsigned long)debugNetworkStackMin.load(),
-        unsigned(sos::Playout::queueCapacity), unsigned(sos::Playout::target),
+        unsigned(sos::MonoPlayout::queueCapacity), unsigned(sos::MonoPlayout::target),
         ESP.getFreeHeap(), ESP.getMinFreeHeap(),
         ESP.getMaxAllocHeap(), ESP.getFreePsram(), ESP.getPsramSize());
     // #endregion

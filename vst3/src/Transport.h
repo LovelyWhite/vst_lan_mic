@@ -22,7 +22,8 @@ public:
         incoming_.reset();
     }
     void prepareReceive();
-    float receiveSample() { return incoming_.next(); }
+    // Writes the next interleaved pair: out[0] = left, out[1] = right.
+    void receiveSamples(float* out) { incoming_.next(out); }
     void clearReceive() { incoming_.reset(); }
 
     std::atomic<uint32_t> sent{0}, received{0}, lost{0}, dropped{0}, socketErrors{0};
@@ -44,7 +45,7 @@ private:
     std::atomic<uint32_t> preferenceVersion_{0}, audioEpoch_{0};
     uint32_t consumedEpoch_ = 0; // Audio-thread owned.
     sos::SpscRing<Outgoing, 32> outgoing_;
-    sos::Playout incoming_;
+    sos::StereoPlayout incoming_; // Downlink arrives as interleaved stereo.
     mutable juce::CriticalSection settingsLock_;
     juce::String preferred_, selected_;
     std::vector<Device> devices_;

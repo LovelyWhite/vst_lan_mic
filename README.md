@@ -12,7 +12,7 @@
 - 两个 VST3 插件：`LAN MIC Send`（发送，构建目标 `lan_mic_send`）和
   `LAN MIC Return`（接收，构建目标 `lan_mic_return`）
 - 无需固定 IP，自动发现 ESP32 设备
-- 网络与 USB 固定 48 kHz，VST 自动转换 DAW 工程采样率；单声道网络处理，立体声 USB 接口
+- 网络与 USB 固定 48 kHz，VST 自动转换 DAW 工程采样率；下行（手机→DAW）网络立体声，上行（DAW→手机）网络单声道，立体声 USB 接口
 - 使用 `arduino-audio-tools` 库实现音频处理
 - 代码精简，避免重复代码
 - 音频需要稳定传输，不出现卡顿或延迟
@@ -40,9 +40,10 @@ DAW -> LAN MIC Send -> Wi-Fi UDP -> ESP32-S3 -> USB IN -> 手机麦克风
 DAW <- LAN MIC Return <- Wi-Fi UDP <- ESP32-S3 <- USB OUT <- 手机播放
 ```
 
-- 网络与 USB 固定 48 kHz，VST 自动转换 DAW 工程采样率；网络单声道，
-  USB PCM16 双通道，立体声输入取左右平均，输出复制到左右。
-- 电脑到 ESP32 使用 14 ms PCM；ESP32 到电脑使用 20 ms、192 kbps CBR Opus。
+- 网络与 USB 固定 48 kHz，VST 自动转换 DAW 工程采样率；上行网络单声道，
+  下行网络真立体声（保留手机左右分离，插件按 L/R 输出），
+  USB PCM16 双通道。
+- 电脑到 ESP32 使用 14 ms PCM；ESP32 到电脑使用 20 ms、192 kbps CBR 交错立体声 Opus。
   两个网络接收方向均使用约 308 ms 起播缓冲；
   小幅速率校正补偿两台设备的时钟差。
 - 独立网络线程、原子同步有界队列（电脑端要求无锁）、短丢包平滑补偿、

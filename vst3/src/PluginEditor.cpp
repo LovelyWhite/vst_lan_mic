@@ -9,7 +9,7 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
                        juce::dontSendNotification);
     deviceLabel_.setText("Device", juce::dontSendNotification);
     gainLabel_.setText("Network gain", juce::dontSendNotification);
-    hint_.setText("Auto sample-rate conversion | 48 kHz network mono | Stereo USB",
+    hint_.setText("Auto sample-rate conversion | 48 kHz network stereo | Stereo USB",
                   juce::dontSendNotification);
     hint_.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
     status_.setMinimumHorizontalScale(0.65f);

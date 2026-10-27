@@ -132,25 +132,36 @@ private:
 
 // Consumer-side elastic playout. A small continuous rate correction compensates
 // independent USB/DAW clocks; hard trimming bounds latency after a long stall.
+// The queue holds interleaved samples: mono (Channels == 1) or stereo L,R pairs
+// (Channels == 2). Both channels share one interpolation phase and one fade so
+// L/R never decorrelate — independent ramps would smear the image and can crack.
+template <int Channels>
 class Playout {
 public:
+    static_assert(Channels == 1 || Channels == 2,
+                  "Playout supports mono or interleaved stereo");
 #if defined(ARDUINO_ARCH_ESP32)
     // Opus keeps the Wi-Fi/lwIP load low enough to restore the full stability
     // buffer while retaining more than 100 KB of measured internal heap.
-    static constexpr size_t queueCapacity = 32768;
+    static constexpr size_t frameCapacity = 32768;
     static constexpr uint32_t targetMs = 300;
     static constexpr float maxRateCorrection = 0.002f;
 #else
-    static constexpr size_t queueCapacity = 32768;
+    static constexpr size_t frameCapacity = 32768;
     static constexpr uint32_t targetMs = 300;
     static constexpr float maxRateCorrection = 0.002f;
 #endif
-    // Keep targets in milliseconds when the protocol frame duration changes.
+    // Queue lengths are in interleaved samples; targets stay in milliseconds
+    // when the protocol frame duration changes.
+    static constexpr size_t queueCapacity = frameCapacity * size_t(Channels);
     static constexpr uint32_t targetFrames =
         (targetMs + kFrameDurationMs - 1) / kFrameDurationMs;
-    static constexpr uint32_t target = targetFrames * kFrameSamples;
-    static constexpr uint32_t trimMargin = queueCapacity - target - kFrameSamples;
-    static_assert(target + kFrameSamples < queueCapacity, "Playout queue is too small");
+    static constexpr uint32_t target =
+        targetFrames * kFrameSamples * uint32_t(Channels);
+    static constexpr uint32_t trimMargin =
+        uint32_t(queueCapacity) - target - kFrameSamples * uint32_t(Channels);
+    static_assert(target + kFrameSamples * uint32_t(Channels) < queueCapacity,
+                  "Playout queue is too small");
     SpscRing<int16_t, queueCapacity> queue;
     std::atomic<uint32_t> underruns{0}, trims{0}, overflows{0};
 
@@ -166,7 +177,7 @@ public:
         primed_ = false;
         phase_ = 0;
         ratio_ = nominalRatio_;
-        previous_ = 0;
+        for (int ch = 0; ch < Channels; ++ch) previous_[ch] = 0;
         fade_ = 0;
     }
     void prepare() {
@@ -182,37 +193,57 @@ public:
         const float desired = nominalRatio_ * (1.0f + correction);
         ratio_ += (desired - ratio_) * 0.02f;
     }
+    // Mono convenience wrapper; out[0] is the only channel when Channels == 1.
     float next() {
+        float out[Channels];
+        next(out);
+        return out[0];
+    }
+    // Writes Channels interleaved floats (out[0] = L, out[1] = R when stereo).
+    void next(float* out) {
         if (!primed_) {
             if (queue.size() < target) {
-                previous_ = std::abs(previous_) < 0.000001f ? 0.0f : previous_ * 0.98f;
-                return previous_;
+                for (int ch = 0; ch < Channels; ++ch) {
+                    previous_[ch] = std::abs(previous_[ch]) < 0.000001f
+                        ? 0.0f : previous_[ch] * 0.98f;
+                    out[ch] = previous_[ch];
+                }
+                return;
             }
-            queue.pop(a_); queue.pop(b_);
+            for (int ch = 0; ch < Channels; ++ch) queue.pop(a_[ch]);
+            for (int ch = 0; ch < Channels; ++ch) queue.pop(b_[ch]);
             phase_ = 0;
             primed_ = true;
             fade_ = 0;
         }
-        float out = (float(a_) + (float(b_) - float(a_)) * phase_) / 32768.0f;
+        for (int ch = 0; ch < Channels; ++ch)
+            out[ch] = (float(a_[ch]) + (float(b_[ch]) - float(a_[ch])) * phase_) /
+                      32768.0f;
         fade_ = std::min(1.0f, fade_ + 1.0f / 96.0f);
-        out *= fade_;
+        for (int ch = 0; ch < Channels; ++ch) out[ch] *= fade_;
         phase_ += ratio_;
         while (phase_ >= 1.0f) {
             phase_ -= 1.0f;
-            a_ = b_;
-            if (!queue.pop(b_)) {
+            for (int ch = 0; ch < Channels; ++ch) a_[ch] = b_[ch];
+            bool starved = false;
+            // Interleaved order: popping the L sample must be followed by its
+            // R partner, so a failed pop always ends the advance for all.
+            for (int ch = 0; ch < Channels; ++ch)
+                if (!queue.pop(b_[ch])) starved = true;
+            if (starved) {
                 primed_ = false;
                 ++underruns;
                 break;
             }
         }
-        previous_ = out;
-        return out;
+        for (int ch = 0; ch < Channels; ++ch) previous_[ch] = out[ch];
     }
 private:
     bool primed_ = false;
-    int16_t a_ = 0, b_ = 0;
+    int16_t a_[Channels] = {}, b_[Channels] = {};
     float phase_ = 0, nominalRatio_ = 1, ratio_ = 1;
-    float previous_ = 0, fade_ = 0;
+    float previous_[Channels] = {}, fade_ = 0;
 };
+using MonoPlayout = Playout<1>;
+using StereoPlayout = Playout<2>;
 } // namespace sos

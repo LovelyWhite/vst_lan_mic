@@ -89,7 +89,7 @@ void Transport::run() {
     int decoderStatus = OPUS_OK;
     OpusDecoder* decoder = sending_
         ? nullptr
-        : opus_decoder_create(sos::kSampleRate, 1, &decoderStatus);
+        : opus_decoder_create(sos::kSampleRate, sos::kOpusChannels, &decoderStatus);
     if (!sending_ && (!decoder || decoderStatus != OPUS_OK)) {
         if (decoder) opus_decoder_destroy(decoder);
         ++socketErrors;
@@ -328,14 +328,17 @@ void Transport::run() {
                     bool decodeOk = true;
                     const uint32_t plcFrames = std::min(gap, kMaxPlcFrames);
                     for (uint32_t i = 0; i < plcFrames; ++i) {
+                        // opus_decode counts per-channel samples; the queue
+                        // consumes the interleaved L/R pairs it emits.
                         const int samples = opus_decode(
                             decoder, nullptr, 0, decoded.data(),
-                            int(decoded.size()), 0);
-                        if (samples != int(decoded.size())) {
+                            int(sos::kOpusFrameSamples), 0);
+                        if (samples != int(sos::kOpusFrameSamples)) {
                             decodeOk = false;
                             break;
                         }
-                        if (!incoming_.queue.push(decoded.data(), uint32_t(samples))) {
+                        if (!incoming_.queue.push(decoded.data(),
+                                uint32_t(samples) * sos::kOpusChannels)) {
                             ++dropped;
                             invalidateAudio();
                         }
@@ -344,15 +347,16 @@ void Transport::run() {
                     const int samples = decodeOk
                         ? opus_decode(decoder, packet.data() + sos::kHeaderSize,
                                       h.payloadBytes, decoded.data(),
-                                      int(decoded.size()), 0)
+                                      int(sos::kOpusFrameSamples), 0)
                         : OPUS_INTERNAL_ERROR;
-                    if (samples != int(decoded.size())) {
+                    if (samples != int(sos::kOpusFrameSamples)) {
                         ++dropped;
                         resetReceiveState();
                         invalidateAudio();
                         continue;
                     }
-                    if (!incoming_.queue.push(decoded.data(), uint32_t(samples))) {
+                    if (!incoming_.queue.push(decoded.data(),
+                            uint32_t(samples) * sos::kOpusChannels)) {
                         ++dropped;
                         // A paused DAW must not replay old queued samples on resume.
                         invalidateAudio();

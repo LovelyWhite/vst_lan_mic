@@ -6,7 +6,8 @@
 
 namespace sos {
 constexpr uint32_t kMagic = 0x31534f53;
-constexpr uint8_t kVersion = 6;
+// v7: phone-to-DAW downlink (AudioOpus) carries interleaved stereo; v6 was mono.
+constexpr uint8_t kVersion = 7;
 constexpr uint16_t kDiscoveryPort = 45678;
 constexpr uint16_t kUplinkPort = 45679;
 constexpr uint32_t kSampleRate = 48000;
@@ -14,8 +15,11 @@ constexpr uint32_t kSampleRate = 48000;
 // the complete IPv4 datagram below the 1500-byte Ethernet/Wi-Fi MTU.
 constexpr size_t kFrameSamples = 672;
 constexpr uint32_t kFrameDurationMs = 14;
+// Per-channel Opus frame length; the wire carries interleaved samples.
 constexpr size_t kOpusFrameSamples = 960;
+constexpr size_t kOpusChannels = 2;
 constexpr uint32_t kOpusFrameDurationMs = 20;
+// Stereo 192 kbps CBR over 20 ms is 480 bytes, still well inside the MTU.
 constexpr int kOpusBitrate = 192000;
 constexpr size_t kOpusMaxBytes = 512;
 constexpr size_t kHeaderSize = 28;
@@ -96,8 +100,9 @@ inline bool decode(const uint8_t* p, size_t size, Header& h) {
     return false;
 }
 
+// Uplink stays mono PCM; downlink Opus frames are interleaved stereo (L,R).
 using Frame = std::array<int16_t, kFrameSamples>;
-using OpusFrame = std::array<int16_t, kOpusFrameSamples>;
+using OpusFrame = std::array<int16_t, kOpusFrameSamples * kOpusChannels>;
 inline void encodePcm(uint8_t* p, const Frame& frame) {
     for (size_t i = 0; i < frame.size(); ++i)
         put16(p + i * 2, uint16_t(frame[i]));

@@ -145,8 +145,20 @@ void BridgeProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             return;
         }
         for (int i = 0; i < buffer.getNumSamples(); ++i) {
-            const auto mono = std::clamp(network.receiveSample() * gain_.getNextValue(), -1.0f, 1.0f);
-            for (int ch = 0; ch < channels; ++ch) buffer.setSample(ch, i, mono);
+            const auto gain = gain_.getNextValue();
+            float stereo[2]{0.0f, 0.0f};
+            network.receiveSamples(stereo);
+            const auto left = std::clamp(stereo[0] * gain, -1.0f, 1.0f);
+            const auto right = std::clamp(stereo[1] * gain, -1.0f, 1.0f);
+            if (channels > 1) {
+                buffer.setSample(0, i, left);
+                buffer.setSample(1, i, right);
+                // Exotic layouts keep the mono fold for the extra channels.
+                const auto mono = (left + right) * 0.5f;
+                for (int ch = 2; ch < channels; ++ch) buffer.setSample(ch, i, mono);
+            } else {
+                buffer.setSample(0, i, (left + right) * 0.5f);
+            }
         }
     }
 }
