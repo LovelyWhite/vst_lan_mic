@@ -263,7 +263,7 @@ void networkTask(void*) {
     WiFiUDP control, audio;
     Peer sender, receiver;
     sos::SequenceTracker sequence;
-    uint32_t lastRetry = 0, lastValidAudio = 0;
+    uint32_t lastRetry = 0, lastValidAudio = 0, lastStackProbeMs = 0;
     uint32_t lastUplinkArrival = 0, lastUplinkSource = 0;
     uint32_t nextDownlinkAttemptMs = 0;
     uint32_t downlinkBackoffMs = 10;
@@ -313,8 +313,15 @@ void networkTask(void*) {
             continue;
         }
         // #region debug-point F:network-stack
-        debugNetworkStackMin.store(std::min(debugNetworkStackMin.load(),
-            uint32_t(uxTaskGetStackHighWaterMark(nullptr))));
+        // uxTaskGetStackHighWaterMark scans the whole 16 KB stack. Probing at
+        // the full 1 kHz loop rate would burn CPU on Core 0; the high-water
+        // mark is monotonic, so a 500 ms sample keeps full diagnostic value.
+        const uint32_t probeMs = millis();
+        if (uint32_t(probeMs - lastStackProbeMs) >= 500) {
+            lastStackProbeMs = probeMs;
+            debugNetworkStackMin.store(std::min(debugNetworkStackMin.load(),
+                uint32_t(uxTaskGetStackHighWaterMark(nullptr))));
+        }
         // #endregion
         const uint32_t now = millis();
         if (WiFi.status() != WL_CONNECTED ||
@@ -485,7 +492,10 @@ void networkTask(void*) {
         // #region debug-point D:network-burst
         debugSendBatchMax.store(std::max(debugSendBatchMax.load(), sentThisLoop));
         // #endregion
-        vTaskDelay(1);
+        // With no subscriber in either direction there is nothing to receive
+        // or send; polling at 1 kHz only spins Core 0 against Wi-Fi/lwIP.
+        vTaskDelay(
+            (sender.port != 0 || receiver.port != 0) ? 1 : pdMS_TO_TICKS(5));
     }
 }
 } // namespace
