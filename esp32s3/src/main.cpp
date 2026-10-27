@@ -26,6 +26,8 @@
 namespace {
 constexpr uint8_t kWifiResetPin = 0;
 constexpr uint32_t kWifiResetHoldMs = 3000;
+constexpr uint8_t kStatusLedPin = 18;
+constexpr bool kStatusLedActiveHigh = true;
 
 audio_tools::USBAudioStream usb;
 constexpr uint32_t kUsbUnityGainQ16 = 65536;
@@ -42,6 +44,10 @@ sos::SpscRing<CapturedFrame, 8> captured;
 std::atomic<uint32_t> uplinkEpoch{0}, lastUplinkMs{0};
 std::atomic<uint32_t> capturedDrops{0}, sentPackets{0}, receivedPackets{0};
 std::atomic<bool> wifiResetInProgress{false};
+std::atomic<bool> statusConfigPortalActive{false};
+std::atomic<bool> statusAudioStreaming{false};
+std::atomic<bool> statusResetArmed{false};
+std::atomic<bool> statusError{false};
 // #region debug-point P-Q-R-S:audio-path-metrics
 std::atomic<uint32_t> debugMicMin{UINT32_MAX}, debugMicMax{0};
 std::atomic<uint32_t> debugUsbTxMin{UINT32_MAX}, debugUsbTxMax{0};
@@ -59,6 +65,33 @@ std::atomic<uint32_t> debugOpusErrors{0}, debugOpusBytesMin{UINT32_MAX}, debugOp
 // #endregion
 char identity[64]{}, usbSerial[24]{};
 uint32_t bootSession = 0;
+
+void setStatusLed(bool on) {
+    digitalWrite(kStatusLedPin, on == kStatusLedActiveHigh ? HIGH : LOW);
+}
+
+void statusLedTask(void*) {
+    for (;;) {
+        const uint32_t now = millis();
+        bool on = false;
+        if (statusError.load(std::memory_order_relaxed)) {
+            const uint32_t phase = now % 1000;
+            on = phase < 100 || (phase >= 200 && phase < 300);
+        } else if (statusResetArmed.load(std::memory_order_relaxed)) {
+            on = ((now / 75) & 1u) == 0;
+        } else if (statusConfigPortalActive.load(std::memory_order_relaxed)) {
+            on = ((now / 500) & 1u) == 0;
+        } else if (WiFi.status() != WL_CONNECTED) {
+            on = ((now / 125) & 1u) == 0;
+        } else if (statusAudioStreaming.load(std::memory_order_relaxed)) {
+            on = now % 1000 >= 100;
+        } else {
+            on = true;
+        }
+        setStatusLed(on);
+        vTaskDelay(pdMS_TO_TICKS(25));
+    }
+}
 
 uint32_t usbGainQ16(float volume) {
     const float bounded = std::max(0.0f, std::min(volume, 1.0f));
@@ -120,6 +153,7 @@ void audioTask(void*) {
         const uint32_t audioLoopNow = millis();
         const bool txActive = usb.mounted() && usb.isStreamingActiveTx();
         const bool rxActive = usb.mounted() && usb.isStreamingActiveRx();
+        statusAudioStreaming.store(txActive || rxActive, std::memory_order_relaxed);
         // #region debug-point Q:playout-levels
         const uint32_t micLevel = microphone.queue.size();
         const uint32_t usbTxLevel = uint32_t(usb.bufferTx().available());
@@ -457,6 +491,14 @@ void networkTask(void*) {
 
 void setup() {
     Serial.begin(115200); // UART bridge, not native USB CDC.
+    pinMode(kStatusLedPin, OUTPUT);
+    setStatusLed(false);
+    const auto ledResult = xTaskCreatePinnedToCore(
+        statusLedTask, "status-led", 2048, nullptr, 1, nullptr, 0);
+    if (ledResult != pdPASS) {
+        setStatusLed(true);
+        Serial.println("Status LED task creation failed");
+    }
     audio_tools::AudioToolsLogger.setLogLevel(audio_tools::AudioLogger::Error);
     const uint64_t mac = ESP.getEfuseMac();
     snprintf(usbSerial, sizeof(usbSerial), "%012llX", (unsigned long long)mac);
@@ -507,6 +549,7 @@ void setup() {
         return true;
     });
     if (!usb.begin(config)) {
+        statusError.store(true, std::memory_order_relaxed);
         Serial.println("USB audio initialization failed");
         return;
     }
@@ -517,6 +560,9 @@ void setup() {
     wifiManager.setConfigPortalTimeout(0);
     wifiManager.setShowInfoUpdate(false);
     wifiManager.setTitle("LAN MIC");
+    wifiManager.setAPCallback([](WiFiManager*) {
+        statusConfigPortalActive.store(true, std::memory_order_relaxed);
+    });
     wifiManager.setWebServerCallback([&]() {
     wifiManager.server->on("/", [&]() {
         wifiManager.server->sendHeader("Location", "/wifi", true);
@@ -525,16 +571,20 @@ void setup() {
     });
     Serial.printf("Open Wi-Fi provisioning AP: %s\n", provisioningSsid);
     if (!wifiManager.autoConnect(provisioningSsid)) {
+        statusError.store(true, std::memory_order_relaxed);
         Serial.println("Wi-Fi provisioning failed to start; rebooting");
         delay(1000);
         ESP.restart();
     }
+    statusConfigPortalActive.store(false, std::memory_order_relaxed);
     WiFi.setSleep(false);
     WiFi.setAutoReconnect(true);
     const auto audioResult = xTaskCreatePinnedToCore(audioTask, "sos-audio", 8192, nullptr, 4, nullptr, 1);
     const auto netResult = xTaskCreatePinnedToCore(networkTask, "sos-network", 16384, nullptr, 2, nullptr, 0);
-    if (audioResult != pdPASS || netResult != pdPASS)
+    if (audioResult != pdPASS || netResult != pdPASS) {
+        statusError.store(true, std::memory_order_relaxed);
         Serial.println("Audio task creation failed; restart after checking free heap");
+    }
 }
 
 void loop() {
@@ -549,6 +599,7 @@ void loop() {
         if (!wifiResetArmed &&
             uint32_t(now - wifiResetPressedMs) >= kWifiResetHoldMs) {
             wifiResetArmed = true;
+            statusResetArmed.store(true, std::memory_order_relaxed);
             Serial.println("Wi-Fi reset armed; release BOOT to restart provisioning");
         }
     } else {

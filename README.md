@@ -67,6 +67,9 @@ DAW <- LAN MIC Return <- Wi-Fi UDP <- ESP32-S3 <- USB OUT <- 手机播放
 3. 手机接 ESP32 的原生 USB OTG 接口，不是 USB-UART 下载口。S3 原生 USB 为 GPIO19/D-、GPIO20/D+。
 4. 手机必须充当 USB Host，使用支持数据的 OTG 线或转接器；供电不足时使用合规的有源 USB Hub。
 5. 不要用普通 USB 线把两个 Host 端互接，也不要将两路未经隔离的 5 V 电源并联。
+6. 红色状态 LED 使用 GPIO18，高电平点亮；建议 GPIO18 经 330 Ω～1 kΩ
+   限流电阻连接 LED 正极，LED 负极接 GND。若实物采用低电平点亮，将
+   `kStatusLedActiveHigh` 改为 `false`。
 
 ### 2. 固件
 
@@ -83,6 +86,15 @@ DAW <- LAN MIC Return <- Wi-Fi UDP <- ESP32-S3 <- USB OUT <- 手机播放
 4. 需要更换网络时，在固件正常运行后长按开发板 **BOOT** 键约 3 秒，
    看到提示后松开。设备会清除已保存凭据并重启进入配网；不要按住 BOOT
    键执行硬复位，否则芯片会进入下载模式。
+
+GPIO18 状态灯含义：
+
+- 快闪（约 125 ms 翻转）：正在连接 Wi-Fi。
+- 慢闪（约 500 ms 翻转）：开放配网热点，等待配置。
+- 常亮：Wi-Fi 已连接，等待音频。
+- 常亮且每秒短灭一次：USB 音频正在传输。
+- 极快闪：BOOT 已长按 3 秒，可以松开并清除凭据。
+- 每秒双闪：USB 初始化或 FreeRTOS 任务创建失败。
 
 配网热点仅在需要配置时出现。由于热点不设密码，不要在不可信场所长时间停留在
 配网模式；正式部署时还应考虑启用 Flash Encryption 保护 NVS 凭据。

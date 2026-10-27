@@ -3,6 +3,7 @@
     "*.wxml": "wxml",
     "istream": "cpp",
     "ostream": "cpp",
-    "bitset": "cpp"
+    "bitset": "cpp",
+    "random": "cpp"
   }
 }
