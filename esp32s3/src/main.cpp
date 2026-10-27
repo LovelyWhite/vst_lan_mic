@@ -290,7 +290,7 @@ void networkTask(void*) {
     if (opusStatus == OPUS_OK)
         opusStatus = opus_encoder_ctl(opusEncoder, OPUS_SET_VBR(0));
     if (opusStatus == OPUS_OK)
-        opusStatus = opus_encoder_ctl(opusEncoder, OPUS_SET_COMPLEXITY(5));
+        opusStatus = opus_encoder_ctl(opusEncoder, OPUS_SET_COMPLEXITY(4));
     if (opusStatus == OPUS_OK)
         opusStatus = opus_encoder_ctl(opusEncoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
     if (opusStatus != OPUS_OK) {
