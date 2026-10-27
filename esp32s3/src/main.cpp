@@ -33,6 +33,9 @@
 namespace {
 constexpr uint8_t kWifiResetPin = 0;
 constexpr uint32_t kWifiResetHoldMs = 3000;
+// How long the USB bridge must stay quiet before Wi-Fi modem sleep is
+// re-enabled; holding the radio awake costs real current while idle.
+constexpr uint32_t kWifiIdleSleepMs = 5000;
 constexpr uint8_t kStatusLedPin = 18;
 constexpr bool kStatusLedActiveHigh = true;
 
@@ -83,6 +86,9 @@ void statusLedTask(void*) {
     for (;;) {
         const uint32_t now = millis();
         bool on = false;
+        // Poll just fast enough to catch the next edge of the active pattern;
+        // steady states can idle far longer than a fixed 25 ms tick.
+        uint32_t pollMs = 25;
         if (statusError.load(std::memory_order_relaxed)) {
             const uint32_t phase = now % 1000;
             on = phase < 100 || (phase >= 200 && phase < 300);
@@ -90,15 +96,21 @@ void statusLedTask(void*) {
             on = ((now / 75) & 1u) == 0;
         } else if (statusConfigPortalActive.load(std::memory_order_relaxed)) {
             on = ((now / 500) & 1u) == 0;
+            pollMs = 125;
         } else if (WiFi.status() != WL_CONNECTED) {
             on = ((now / 125) & 1u) == 0;
+            pollMs = 31;
         } else if (statusAudioStreaming.load(std::memory_order_relaxed)) {
-            on = now % 1000 >= 100;
+            // Brief flash per second instead of a 90% duty glow: streaming
+            // stays visible while the LED current budget drops ~9x.
+            on = now % 1000 < 100;
+            pollMs = 50;
         } else {
             on = true;
+            pollMs = 250;
         }
         setStatusLed(on);
-        vTaskDelay(pdMS_TO_TICKS(25));
+        vTaskDelay(pdMS_TO_TICKS(pollMs));
     }
 }
 
@@ -145,6 +157,8 @@ void audioTask(void*) {
     static CapturedFrame frame;
     size_t frameUsed = 0;
     uint32_t captureSequence = 0;
+    uint32_t lastStreamActiveMs = 0;
+    bool wifiModemSleeping = true; // IDF default while associated.
     std::array<uint8_t, 192> speakerBytes{};
     std::array<int16_t, 96> micSamples{};
     int32_t speakerLeftGainQ16 = int32_t(kUsbUnityGainQ16);
@@ -168,6 +182,19 @@ void audioTask(void*) {
         const bool txActive = usb.mounted() && usb.isStreamingActiveTx();
         const bool rxActive = usb.mounted() && usb.isStreamingActiveRx();
         statusAudioStreaming.store(txActive || rxActive, std::memory_order_relaxed);
+        // Modem sleep trades a little Wi-Fi latency for a large idle power
+        // saving, so it only returns after the USB bridge has been quiet.
+        if (txActive || rxActive) {
+            lastStreamActiveMs = millis();
+            if (wifiModemSleeping) {
+                wifiModemSleeping = false;
+                WiFi.setSleep(false);
+            }
+        } else if (!wifiModemSleeping &&
+                   uint32_t(millis() - lastStreamActiveMs) >= kWifiIdleSleepMs) {
+            WiFi.setSleep(true);
+            wifiModemSleeping = true;
+        }
 #if SOS_METRICS
         // #region debug-point Q:playout-levels
         const uint32_t micLevel = microphone.queue.size();
@@ -278,7 +305,10 @@ void audioTask(void*) {
                 }
             }
         }
-        vTaskDelay(1);
+        // Serve USB at 1 kHz only while a direction is live; an idle bridge
+        // slows to 200 Hz, adding at most 5 ms to start-of-stream detection,
+        // which the 300 ms network playout buffer hides.
+        vTaskDelay((txActive || rxActive) ? 1 : pdMS_TO_TICKS(5));
     }
 }
 
@@ -546,10 +576,12 @@ void networkTask(void*) {
         debugSendBatchMax.store(std::max(debugSendBatchMax.load(), sentThisLoop));
         // #endregion
 #endif
-        // With no subscriber in either direction there is nothing to receive
-        // or send; polling at 1 kHz only spins Core 0 against Wi-Fi/lwIP.
-        vTaskDelay(
-            (sender.port != 0 || receiver.port != 0) ? 1 : pdMS_TO_TICKS(5));
+        // With a subscriber the socket poll stays at 1 kHz. With no sockets
+        // there is nothing to parse and reconnect is timer-driven, so 20 Hz
+        // is plenty; otherwise keep 5 ms discovery responsiveness without
+        // spinning Core 0 against Wi-Fi/lwIP at 1 kHz.
+        vTaskDelay((sender.port != 0 || receiver.port != 0) ? 1 :
+            socketsReady ? pdMS_TO_TICKS(5) : pdMS_TO_TICKS(50));
     }
 }
 } // namespace
@@ -642,7 +674,8 @@ void setup() {
         ESP.restart();
     }
     statusConfigPortalActive.store(false, std::memory_order_relaxed);
-    WiFi.setSleep(false);
+    // Wi-Fi modem sleep keeps the IDF default here; audioTask widens it to
+    // WIFI_PS_NONE only while USB audio is streaming (see kWifiIdleSleepMs).
     WiFi.setAutoReconnect(true);
     const auto audioResult = xTaskCreatePinnedToCore(audioTask, "sos-audio", 8192, nullptr, 4, nullptr, 1);
     const auto netResult = xTaskCreatePinnedToCore(networkTask, "sos-network", 16384, nullptr, 2, nullptr, 0);
