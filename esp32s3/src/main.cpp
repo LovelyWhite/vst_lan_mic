@@ -23,6 +23,13 @@
 #endif
 #include "AudioBuffer.h"
 
+// Set to 1 (or via build flags -DSOS_METRICS=1) to re-enable the periodic
+// serial metrics snapshot and the hot-path instrumentation feeding it. 0
+// compiles all of that out of the 1 kHz audio/network loops to save CPU.
+#ifndef SOS_METRICS
+#define SOS_METRICS 0
+#endif
+
 namespace {
 constexpr uint8_t kWifiResetPin = 0;
 constexpr uint32_t kWifiResetHoldMs = 3000;
@@ -42,12 +49,13 @@ struct CapturedFrame {
 };
 sos::SpscRing<CapturedFrame, 8> captured;
 std::atomic<uint32_t> uplinkEpoch{0}, lastUplinkMs{0};
-std::atomic<uint32_t> capturedDrops{0}, sentPackets{0}, receivedPackets{0};
 std::atomic<bool> wifiResetInProgress{false};
 std::atomic<bool> statusConfigPortalActive{false};
 std::atomic<bool> statusAudioStreaming{false};
 std::atomic<bool> statusResetArmed{false};
 std::atomic<bool> statusError{false};
+#if SOS_METRICS
+std::atomic<uint32_t> capturedDrops{0}, sentPackets{0}, receivedPackets{0};
 // #region debug-point P-Q-R-S:audio-path-metrics
 std::atomic<uint32_t> debugMicMin{UINT32_MAX}, debugMicMax{0};
 std::atomic<uint32_t> debugUsbTxMin{UINT32_MAX}, debugUsbTxMax{0};
@@ -63,6 +71,7 @@ std::atomic<uint32_t> debugUplinkArrivalMax{0}, debugUplinkSourceMax{0};
 std::atomic<uint32_t> debugNetworkStackMin{UINT32_MAX};
 std::atomic<uint32_t> debugOpusErrors{0}, debugOpusBytesMin{UINT32_MAX}, debugOpusBytesMax{0};
 // #endregion
+#endif
 char identity[64]{}, usbSerial[24]{};
 uint32_t bootSession = 0;
 
@@ -140,9 +149,11 @@ void audioTask(void*) {
     std::array<int16_t, 96> micSamples{};
     int32_t speakerLeftGainQ16 = int32_t(kUsbUnityGainQ16);
     int32_t speakerRightGainQ16 = int32_t(kUsbUnityGainQ16);
+#if SOS_METRICS
     uint32_t lastAudioLoopMs = millis();
     uint32_t lastUsbTxProgressMs = lastAudioLoopMs;
     uint32_t lastUsbTxCount = usb.getTxXferCount();
+#endif
     auto smoothGain = [](int32_t current, int32_t target) {
         const int32_t difference = target - current;
         if (difference == 0) return current;
@@ -151,10 +162,13 @@ void audioTask(void*) {
         return current + step;
     };
     for (;;) {
+#if SOS_METRICS
         const uint32_t audioLoopNow = millis();
+#endif
         const bool txActive = usb.mounted() && usb.isStreamingActiveTx();
         const bool rxActive = usb.mounted() && usb.isStreamingActiveRx();
         statusAudioStreaming.store(txActive || rxActive, std::memory_order_relaxed);
+#if SOS_METRICS
         // #region debug-point Q:playout-levels
         const uint32_t micLevel = microphone.queue.size();
         const uint32_t usbTxLevel = uint32_t(usb.bufferTx().available());
@@ -191,6 +205,7 @@ void audioTask(void*) {
         }
         lastUsbTxCount = usbTxCount;
         // #endregion
+#endif
         const auto newEpoch = uplinkEpoch.load(std::memory_order_acquire);
         const bool fresh = uint32_t(millis() - lastUplinkMs.load()) < sos::kAudioTimeoutMs;
         if (newEpoch != epoch || txActive != txWasActive || (uplinkWasFresh && !fresh)) {
@@ -254,7 +269,11 @@ void audioTask(void*) {
                 if (frameUsed == frame.pcm.size()) {
                     frame.capturedMs = millis();
                     frame.sequence = captureSequence++;
+#if SOS_METRICS
                     if (!captured.push(&frame, 1)) ++capturedDrops;
+#else
+                    captured.push(&frame, 1);
+#endif
                     frameUsed = 0;
                 }
             }
@@ -267,8 +286,11 @@ void networkTask(void*) {
     WiFiUDP control, audio;
     Peer sender, receiver;
     sos::SequenceTracker sequence;
-    uint32_t lastRetry = 0, lastValidAudio = 0, lastStackProbeMs = 0;
+    uint32_t lastRetry = 0, lastValidAudio = 0;
+#if SOS_METRICS
+    uint32_t lastStackProbeMs = 0;
     uint32_t lastUplinkArrival = 0, lastUplinkSource = 0;
+#endif
     uint32_t nextDownlinkAttemptMs = 0;
     uint32_t downlinkBackoffMs = 10;
     bool socketsReady = false;
@@ -303,7 +325,9 @@ void networkTask(void*) {
     auto invalidateSender = [&] {
         sender = Peer{};
         sequence.reset();
+#if SOS_METRICS
         lastUplinkArrival = lastUplinkSource = 0;
+#endif
         ++uplinkEpoch;
     };
     for (;;) {
@@ -320,12 +344,14 @@ void networkTask(void*) {
         // uxTaskGetStackHighWaterMark scans the whole 16 KB stack. Probing at
         // the full 1 kHz loop rate would burn CPU on Core 0; the high-water
         // mark is monotonic, so a 500 ms sample keeps full diagnostic value.
+#if SOS_METRICS
         const uint32_t probeMs = millis();
         if (uint32_t(probeMs - lastStackProbeMs) >= 500) {
             lastStackProbeMs = probeMs;
             debugNetworkStackMin.store(std::min(debugNetworkStackMin.load(),
                 uint32_t(uxTaskGetStackHighWaterMark(nullptr))));
         }
+#endif
         // #endregion
         const uint32_t now = millis();
         if (WiFi.status() != WL_CONNECTED ||
@@ -381,7 +407,9 @@ void networkTask(void*) {
                         peer = {ip, port, h.session, now};
                         if (changed && h.flags == sos::Sender) {
                             sequence.reset();
+#if SOS_METRICS
                             lastUplinkArrival = lastUplinkSource = 0;
+#endif
                             ++uplinkEpoch;
                         } else if (changed && h.flags == sos::Receiver) {
                             captured.clear();
@@ -413,6 +441,7 @@ void networkTask(void*) {
                 if (uint32_t(now - lastValidAudio) >= sos::kAudioTimeoutMs) sequence.reset();
                 if (sequence.accept(h.sequence, sos::decodePcm(packet.data() + sos::kHeaderSize),
                                     [](const sos::Frame& f) { microphone.push(f); })) {
+#if SOS_METRICS
                     if (lastUplinkArrival != 0) {
                         debugUplinkArrivalMax.store(std::max(
                             debugUplinkArrivalMax.load(), uint32_t(now - lastUplinkArrival)));
@@ -422,21 +451,26 @@ void networkTask(void*) {
                     }
                     lastUplinkArrival = now;
                     lastUplinkSource = h.timestampMs;
+#endif
                     lastValidAudio = now;
                     lastUplinkMs.store(now, std::memory_order_release);
+#if SOS_METRICS
                     ++receivedPackets;
                     // #region debug-point P-S:uplink-gaps
                     debugUplinkLost.store(sequence.lost);
                     debugUplinkGapMax.store(sequence.maxGap);
                     debugUplinkBridged.store(sequence.bridged);
                     // #endregion
+#endif
                 }
             }
         }
 
         // On congestion, back off and resume from the newest frame. Retrying an
         // old frame creates a send/log storm and can never catch real time.
+#if SOS_METRICS
         uint32_t sentThisLoop = 0;
+#endif
         const uint32_t attemptNow = millis();
         if (!socketsReady || !receiver.active(attemptNow)) {
             captured.clear();
@@ -446,27 +480,37 @@ void networkTask(void*) {
             const uint32_t queued = captured.size();
             if (queued > 1) {
                 captured.discard(queued - 1);
+#if SOS_METRICS
                 debugSuperseded.fetch_add(queued - 1);
+#endif
             }
             if (captured.pop(pendingDownlink)) {
-                // #region debug-point D:network-burst
                 const uint32_t frameAge = uint32_t(attemptNow - pendingDownlink.capturedMs);
+#if SOS_METRICS
+                // #region debug-point D:network-burst
                 debugFrameAgeMax.store(std::max(debugFrameAgeMax.load(), frameAge));
                 // #endregion
+#endif
                 if (frameAge > 300) {
+#if SOS_METRICS
                     ++debugStaleDrops;
+#endif
                     nextDownlinkAttemptMs = attemptNow + 1;
                 } else {
                     const int encoded = opus_encode(
                         opusEncoder, pendingDownlink.pcm.data(), int(sos::kOpusFrameSamples),
                         packet.data() + sos::kHeaderSize, int(sos::kOpusMaxBytes));
                     if (encoded <= 0) {
+#if SOS_METRICS
                         ++debugOpusErrors;
+#endif
                         nextDownlinkAttemptMs = attemptNow + sos::kOpusFrameDurationMs;
                     } else {
+#if SOS_METRICS
                         debugOpusBytesMin.store(std::min(debugOpusBytesMin.load(), uint32_t(encoded)));
                         debugOpusBytesMax.store(std::max(debugOpusBytesMax.load(), uint32_t(encoded)));
                         ++sentThisLoop;
+#endif
                         sos::Header h{sos::Kind::AudioOpus, 0, bootSession,
                                       pendingDownlink.sequence, pendingDownlink.capturedMs,
                                       uint16_t(encoded)};
@@ -475,15 +519,19 @@ void networkTask(void*) {
                         if (begun) audio.write(packet.data(), bytes);
                         // #region debug-point A:udp-send-result
                         if (begun && audio.endPacket()) {
+#if SOS_METRICS
                             ++sentPackets;
                             debugUdpFailureBurst.store(0);
+#endif
                             downlinkBackoffMs = 10;
                             nextDownlinkAttemptMs = attemptNow + 4;
                         } else {
+#if SOS_METRICS
                             ++debugUdpFailures;
                             const uint32_t burst = debugUdpFailureBurst.fetch_add(1) + 1;
                             debugUdpFailureBurstMax.store(
                                 std::max(debugUdpFailureBurstMax.load(), burst));
+#endif
                             nextDownlinkAttemptMs = attemptNow + downlinkBackoffMs;
                             downlinkBackoffMs =
                                 std::min(downlinkBackoffMs * 2, uint32_t(100));
@@ -493,9 +541,11 @@ void networkTask(void*) {
                 }
             }
         }
+#if SOS_METRICS
         // #region debug-point D:network-burst
         debugSendBatchMax.store(std::max(debugSendBatchMax.load(), sentThisLoop));
         // #endregion
+#endif
         // With no subscriber in either direction there is nothing to receive
         // or send; polling at 1 kHz only spins Core 0 against Wi-Fi/lwIP.
         vTaskDelay(
@@ -603,7 +653,6 @@ void setup() {
 }
 
 void loop() {
-    static uint32_t lastDebugMs = millis();
     static uint32_t wifiResetPressedMs = 0;
     static bool wifiResetArmed = false;
     delay(25);
@@ -636,6 +685,8 @@ void loop() {
         }
     }
 
+#if SOS_METRICS
+    static uint32_t lastDebugMs = millis();
     const bool usbAudioActive =
         usb.isStreamingActiveTx() || usb.isStreamingActiveRx();
     if (usbAudioActive || uint32_t(now - lastDebugMs) < 5000) return;
@@ -688,4 +739,5 @@ void loop() {
         ESP.getFreeHeap(), ESP.getMinFreeHeap(),
         ESP.getMaxAllocHeap(), ESP.getFreePsram(), ESP.getPsramSize());
     // #endregion
+#endif
 }
