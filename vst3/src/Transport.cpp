@@ -240,12 +240,14 @@ void Transport::run() {
                 resetReceiveState();
                 invalidateAudio();
             }
-            if (peerIp.isEmpty() &&
-                uint32_t(now - lastInterfaceRefresh) >= 5000) {
+            // Discovery and stale-device pruning must keep running while a peer
+            // is connected: devices answer Discover reactively, so pausing it
+            // would freeze the device list for the whole session.
+            if (uint32_t(now - lastInterfaceRefresh) >= 5000) {
                 lastInterfaceRefresh = now;
                 rebuildDiscoveryEndpoints();
             }
-            if (peerIp.isEmpty() && uint32_t(now - lastDiscover) >= 1000) {
+            if (uint32_t(now - lastDiscover) >= 1000) {
                 lastDiscover = now;
                 // Windows cannot obtain directed broadcasts through JUCE 8.0.6.
                 // A socket bound to each local address forces limited broadcast

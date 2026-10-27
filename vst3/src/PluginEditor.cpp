@@ -65,8 +65,9 @@ void BridgeEditor::resized() {
 void BridgeEditor::timerCallback() {
     const auto selected = processor_.network.preferredDevice();
     juce::StringArray ids;
+    // Only discovered devices are listed; an unreachable preference must not
+    // linger as a ghost entry.
     for (const auto& device : processor_.network.devices()) ids.addIfNotAlreadyThere(device.identity);
-    if (selected.isNotEmpty()) ids.addIfNotAlreadyThere(selected);
     ids.sort(true);
     if (ids != deviceIds_ || device_.getNumItems() == 0) {
         deviceIds_ = ids;
