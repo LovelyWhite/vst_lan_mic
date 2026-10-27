@@ -112,8 +112,8 @@ pio device monitor -d esp32s3 -b 115200
 当前 `platform = espressif32` 使用本机安装的平台；本次编译日志为平台 55.3.312、
 Arduino 3.3.12、ESP-IDF 5.5.5。音频库固定为
 `arduino-audio-tools@27547291d4a1514e64d37a97f1ce34636af86bd6`。
-下行压缩库固定为 `codec-opus@v1.6.1`。编码器状态显式放在 PSRAM，
-Wi-Fi/lwIP 可用内部堆不再受编码器占用影响。
+下行压缩库固定为 `codec-opus@v1.6.1`。编码器状态当前显式放在内部 RAM，
+需关注剩余连续块和 Wi-Fi/lwIP 可用堆空间。
 Wi-Fi 网页配网固定使用 `WiFiManager@2.0.17`。
 平台未锁定版本，其他机器的解析结果可能不同，应核对构建日志。
 首次构建需要下载依赖。Arduino 3.3.12 使用原生 `AUDIO` 接口槽；
