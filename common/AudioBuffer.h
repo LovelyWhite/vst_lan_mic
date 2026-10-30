@@ -50,70 +50,69 @@ inline int16_t pcm16(float value) {
     return int16_t(std::max(-32768.0f, std::min(32767.0f, value * 32768.0f)));
 }
 
-// Run on the network thread. Reject duplicates/late packets, conceal short gaps.
+// Run on the network thread. Reject duplicates/late packets, conceal gaps.
 class SequenceTracker {
 public:
     void reset() { valid_ = false; lastSample_ = 0; }
+    // A gap wider than this is a stream restart: the 500 ms audio timeout
+    // resets this tracker long before the sequence can jump that far, so a
+    // larger delta resumes without concealment like a fresh stream.
+    static constexpr uint32_t kRestartGapFrames = 40;
     template <typename Sink>
     bool accept(uint32_t seq, const Frame& frame, Sink&& sink) {
         if (valid_) {
             const uint32_t delta = seq - next_;
             if (delta >= 0x80000000u) return false;
-            if (delta > 0) {
+            if (delta > 0 && delta <= kRestartGapFrames) {
                 lost += delta;
                 maxGap = std::max(maxGap, delta);
+                bridged += delta;
+                next_ = seq + 1;
+                const int16_t prior = lastSample_;
+                lastSample_ = frame.back();
+                Frame scratch{};
                 if (delta <= 2) {
-                    // Keep the bridge continuous without drawing a full-scale
-                    // DC ramp between unrelated packet endpoints.
-                    const uint32_t bridgeSamples =
-                        delta * uint32_t(frame.size());
-                    const uint32_t half = bridgeSamples / 2;
-                    const float start = float(lastSample_);
-                    const float end = float(frame.front());
-                    Frame scratch{};
-                    for (uint32_t missing = 0; missing < delta; ++missing) {
+                    // Glide linearly across a short gap. Linear joins both
+                    // ends with a finite slope; a smoothstep curve has zero
+                    // slope at both ends, which clashes with the real
+                    // waveform's slope and cracks on loud passages.
+                    const float start = float(prior);
+                    const float span = float(frame.front()) - start;
+                    const float positions =
+                        float(delta * uint32_t(frame.size()) + 1);
+                    for (uint32_t m = 0; m < delta; ++m) {
                         for (size_t i = 0; i < scratch.size(); ++i) {
                             const uint32_t position =
-                                missing * uint32_t(scratch.size()) +
-                                uint32_t(i) + 1;
-                            if (position <= half) {
-                                const float t = float(position) / float(half);
-                                const float smooth = t * t * (3.0f - 2.0f * t);
-                                scratch[i] = int16_t(start * (1.0f - smooth));
-                            } else {
-                                const float t =
-                                    float(position - half) /
-                                    float(bridgeSamples - half);
-                                const float smooth = t * t * (3.0f - 2.0f * t);
-                                scratch[i] = int16_t(end * smooth);
-                            }
+                                m * uint32_t(scratch.size()) + uint32_t(i) + 1;
+                            scratch[i] = int16_t(start +
+                                span * (float(position) / positions));
                         }
                         sink(scratch);
                     }
-                    bridged += delta;
-                    next_ = seq + 1;
-                    lastSample_ = frame.back();
                     sink(frame);
-                    return true;
+                } else {
+                    // Conceal a wide gap with a 1 ms taper out, silence, and
+                    // a 1 ms taper back in. Tapering across a whole 14 ms
+                    // frame sweeps the full scale in one frame and reads as
+                    // a zip; 1 ms only rounds off the discontinuity. Both
+                    // taper boundaries that touch silence are exact zeros;
+                    // the residual taper step lands where signal is present
+                    // and is masked by it.
+                    constexpr size_t fade = 48;  // 1 ms at 48 kHz
+                    for (size_t i = 0; i < fade; ++i)
+                        scratch[i] = int16_t(float(prior) *
+                            (1.0f - (float(i) + 1.0f) / float(fade)));
+                    sink(scratch);
+                    scratch.fill(0);
+                    for (uint32_t m = 1; m < delta; ++m) sink(scratch);
+                    // The real frame itself fades back in — sink it exactly
+                    // once, here, never again below.
+                    Frame resume = frame;
+                    for (size_t i = 0; i < fade; ++i)
+                        resume[i] = int16_t(float(frame[i]) *
+                            (float(i) / float(fade)));
+                    sink(resume);
                 }
-                constexpr uint32_t concealFramesMax =
-                    (300 + kFrameDurationMs - 1) / kFrameDurationMs;
-                const uint32_t concealFrames = std::min(delta, concealFramesMax);
-                Frame scratch{};
-                for (size_t i = 0; i < scratch.size(); ++i)
-                    scratch[i] = int16_t(float(lastSample_) *
-                        (1.0f - float(i + 1) / float(scratch.size())));
-                sink(scratch);
-                scratch.fill(0);
-                for (uint32_t i = 1; i < concealFrames; ++i) sink(scratch);
-
-                // Resume from silence without a full-scale discontinuity.
-                for (size_t i = 0; i < scratch.size(); ++i)
-                    scratch[i] = int16_t(float(frame[i]) *
-                        (float(i + 1) / float(scratch.size())));
-                next_ = seq + 1;
-                lastSample_ = frame.back();
-                sink(scratch);
                 return true;
             }
         }

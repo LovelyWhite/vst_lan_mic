@@ -23,19 +23,17 @@
 #endif
 #include "AudioBuffer.h"
 
-// Set to 1 (or via build flags -DSOS_METRICS=1) to re-enable the periodic
-// serial metrics snapshot and the hot-path instrumentation feeding it. 0
-// compiles all of that out of the 1 kHz audio/network loops to save CPU.
-#ifndef SOS_METRICS
-#define SOS_METRICS 0
-#endif
-
 namespace {
 constexpr uint8_t kWifiResetPin = 0;
 constexpr uint32_t kWifiResetHoldMs = 3000;
 // How long the USB bridge must stay quiet before Wi-Fi modem sleep is
 // re-enabled; holding the radio awake costs real current while idle.
 constexpr uint32_t kWifiIdleSleepMs = 5000;
+// ISO-IN transfers complete once per millisecond while the host keeps the
+// streaming alt setting open, so a 100 ms silence in the ISR-side completion
+// counter means the endpoint is closed (or the cable pulled; mounted() covers
+// that instantly).
+constexpr uint32_t kUsbTxActiveTimeoutMs = 100;
 constexpr uint8_t kStatusLedPin = 18;
 constexpr bool kStatusLedActiveHigh = true;
 
@@ -57,24 +55,6 @@ std::atomic<bool> statusConfigPortalActive{false};
 std::atomic<bool> statusAudioStreaming{false};
 std::atomic<bool> statusResetArmed{false};
 std::atomic<bool> statusError{false};
-#if SOS_METRICS
-std::atomic<uint32_t> capturedDrops{0}, sentPackets{0}, receivedPackets{0};
-// #region debug-point P-Q-R-S:audio-path-metrics
-std::atomic<uint32_t> debugMicMin{UINT32_MAX}, debugMicMax{0};
-std::atomic<uint32_t> debugUsbTxMin{UINT32_MAX}, debugUsbTxMax{0};
-std::atomic<uint32_t> debugUsbRxMin{UINT32_MAX}, debugUsbRxMax{0};
-std::atomic<uint32_t> debugAudioLoopGapMax{0};
-std::atomic<uint32_t> debugUsbTxProgressGapMax{0}, debugUsbTxAdvanceMax{0};
-std::atomic<uint32_t> debugUsbTxDoneMin{UINT32_MAX}, debugUsbTxDoneMax{0};
-std::atomic<uint32_t> debugCapturePeak{0}, debugSendBatchMax{0}, debugFrameAgeMax{0};
-std::atomic<uint32_t> debugUdpFailures{0}, debugUdpFailureBurst{0}, debugUdpFailureBurstMax{0};
-std::atomic<uint32_t> debugUplinkLost{0}, debugUplinkGapMax{0}, debugUplinkBridged{0};
-std::atomic<uint32_t> debugStaleDrops{0}, debugSuperseded{0};
-std::atomic<uint32_t> debugUplinkArrivalMax{0}, debugUplinkSourceMax{0};
-std::atomic<uint32_t> debugNetworkStackMin{UINT32_MAX};
-std::atomic<uint32_t> debugOpusErrors{0}, debugOpusBytesMin{UINT32_MAX}, debugOpusBytesMax{0};
-// #endregion
-#endif
 char identity[64]{}, usbSerial[24]{};
 uint32_t bootSession = 0;
 
@@ -163,11 +143,12 @@ void audioTask(void*) {
     std::array<int16_t, 96> micSamples{};
     int32_t speakerLeftGainQ16 = int32_t(kUsbUnityGainQ16);
     int32_t speakerRightGainQ16 = int32_t(kUsbUnityGainQ16);
-#if SOS_METRICS
-    uint32_t lastAudioLoopMs = millis();
-    uint32_t lastUsbTxProgressMs = lastAudioLoopMs;
+    // See the audio loop below for why the completion counter is the
+    // authority for TX liveness. lastUsbTxProgressMs starts at 0: no progress
+    // observed, so TX stays inactive until the first ISR-side transfer
+    // completes.
     uint32_t lastUsbTxCount = usb.getTxXferCount();
-#endif
+    uint32_t lastUsbTxProgressMs = 0;
     auto smoothGain = [](int32_t current, int32_t target) {
         const int32_t difference = target - current;
         if (difference == 0) return current;
@@ -176,10 +157,26 @@ void audioTask(void*) {
         return current + step;
     };
     for (;;) {
-#if SOS_METRICS
         const uint32_t audioLoopNow = millis();
-#endif
-        const bool txActive = usb.mounted() && usb.isStreamingActiveTx();
+        // isStreamingActiveTx() reads ep_in, a field written by the USB
+        // device task/ISR and read here without cross-context ordering; the
+        // library documents platforms where it keeps returning false while
+        // ISO-IN transfers are actually running (USBAudioDeviceBase.h "known
+        // issues"), and the ESP32-S3 port reproduces it: snapshots showed
+        // txXfer climbing ~1k/s while tx=0 and the supply loop never ran,
+        // leaving the phone fed with zero-padding -- the DAW->phone stutter.
+        // Trust the ISR-side completion counter instead: audiod_xfer_cb()
+        // advances it once per millisecond only while the IN pipe is live,
+        // so recent progress is proof of a streaming alt setting.
+        const uint32_t usbTxCount = usb.getTxXferCount();
+        const bool usbTxProgress = usbTxCount != lastUsbTxCount;
+        const uint32_t sinceProgressMs = audioLoopNow - lastUsbTxProgressMs;
+        if (usbTxProgress) {
+            lastUsbTxCount = usbTxCount;
+            lastUsbTxProgressMs = audioLoopNow;
+        }
+        const bool txActive = usb.mounted() &&
+            (usbTxProgress || sinceProgressMs < kUsbTxActiveTimeoutMs);
         const bool rxActive = usb.mounted() && usb.isStreamingActiveRx();
         statusAudioStreaming.store(txActive || rxActive, std::memory_order_relaxed);
         // Modem sleep trades a little Wi-Fi latency for a large idle power
@@ -195,44 +192,6 @@ void audioTask(void*) {
             WiFi.setSleep(true);
             wifiModemSleeping = true;
         }
-#if SOS_METRICS
-        // #region debug-point Q:playout-levels
-        const uint32_t micLevel = microphone.queue.size();
-        const uint32_t usbTxLevel = uint32_t(usb.bufferTx().available());
-        const uint32_t usbRxLevel = uint32_t(usb.bufferRx().available());
-        debugMicMin.store(std::min(debugMicMin.load(), micLevel));
-        debugMicMax.store(std::max(debugMicMax.load(), micLevel));
-        debugUsbTxMin.store(std::min(debugUsbTxMin.load(), usbTxLevel));
-        debugUsbTxMax.store(std::max(debugUsbTxMax.load(), usbTxLevel));
-        debugUsbRxMin.store(std::min(debugUsbRxMin.load(), usbRxLevel));
-        debugUsbRxMax.store(std::max(debugUsbRxMax.load(), usbRxLevel));
-        debugCapturePeak.store(std::max(debugCapturePeak.load(), captured.size()));
-        // #endregion
-        // #region debug-point R:usb-in-progress
-        debugAudioLoopGapMax.store(std::max(
-            debugAudioLoopGapMax.load(), uint32_t(audioLoopNow - lastAudioLoopMs)));
-        lastAudioLoopMs = audioLoopNow;
-        const uint32_t usbTxCount = usb.getTxXferCount();
-        if (txActive && usbTxCount != lastUsbTxCount) {
-            debugUsbTxProgressGapMax.store(std::max(
-                debugUsbTxProgressGapMax.load(),
-                uint32_t(audioLoopNow - lastUsbTxProgressMs)));
-            debugUsbTxAdvanceMax.store(std::max(
-                debugUsbTxAdvanceMax.load(), uint32_t(usbTxCount - lastUsbTxCount)));
-            const uint32_t completedBytes = usb.getTxXferredLast();
-            if (completedBytes != 0) {
-                debugUsbTxDoneMin.store(std::min(
-                    debugUsbTxDoneMin.load(), completedBytes));
-                debugUsbTxDoneMax.store(std::max(
-                    debugUsbTxDoneMax.load(), completedBytes));
-            }
-            lastUsbTxProgressMs = audioLoopNow;
-        } else if (!txActive) {
-            lastUsbTxProgressMs = audioLoopNow;
-        }
-        lastUsbTxCount = usbTxCount;
-        // #endregion
-#endif
         const auto newEpoch = uplinkEpoch.load(std::memory_order_acquire);
         const bool fresh = uint32_t(millis() - lastUplinkMs.load()) < sos::kAudioTimeoutMs;
         if (newEpoch != epoch || txActive != txWasActive || (uplinkWasFresh && !fresh)) {
@@ -242,19 +201,34 @@ void audioTask(void*) {
         txWasActive = txActive;
         uplinkWasFresh = fresh;
 
-        // Keep 8 ms queued for USB scheduling jitter. The network playout
-        // remains the main latency buffer.
-        // Checking free space avoids Audio Tools' blocking write retry path.
+        // Top the USB IN FIFO up to (almost) full on every pass. Flow control
+        // drains one 192-byte stereo packet per millisecond and zero-pads any
+        // shortfall -- audible as a click. The steady FIFO level IS the stall
+        // budget: the old 1536-byte floor was 8 ms in stereo and the observed
+        // 5-6 ms scheduling jitter emptied it (debug usbTx=0..1536 with
+        // usbTxGapMax=5), and even the 15 ms of a 16-packet FIFO still let the
+        // rarer longer stalls -- flash cache misses, WiFi internals -- surface
+        // as isolated clicks. The config now sizes the FIFO at 48 packets
+        // (~47 ms); this full top-up is what holds that level steady.
+        // Checking free space avoids Audio Tools' blocking write retry path,
+        // and the free-space gate doubles as the poison-pill filter here:
+        // write() re-checks the same unreliable isStreamingActiveTx() flag
+        // and silently discards the packet while reporting success, so feed
+        // bufferTx() directly (the only other writer is this task, and the
+        // ISR-side xfer callback only drains, so the free-space observation
+        // cannot go stale towards "less room").
         if (txActive) {
             microphone.prepare();
-            for (int batch = 0; batch < 8 && usb.bufferTx().available() < 1536; ++batch) {
-                if (usb.availableForWrite() < int(sizeof(micSamples))) break;
+            for (int batch = 0; batch < 8 &&
+                 usb.availableForWrite() >= int(sizeof(micSamples)); ++batch) {
                 for (size_t i = 0; i < 48; ++i) {
                     const int16_t mono = fresh ? sos::pcm16(microphone.next()) : 0;
                     micSamples[2 * i] = mono;
                     micSamples[2 * i + 1] = mono;
                 }
-                usb.write(reinterpret_cast<uint8_t*>(micSamples.data()), sizeof(micSamples));
+                usb.bufferTx().writeArray(
+                    reinterpret_cast<uint8_t*>(micSamples.data()),
+                    int(sizeof(micSamples)));
             }
         } else {
             microphone.reset();
@@ -296,11 +270,7 @@ void audioTask(void*) {
                 if (frameUsed == frame.pcm.size()) {
                     frame.capturedMs = millis();
                     frame.sequence = captureSequence++;
-#if SOS_METRICS
-                    if (!captured.push(&frame, 1)) ++capturedDrops;
-#else
                     captured.push(&frame, 1);
-#endif
                     frameUsed = 0;
                 }
             }
@@ -317,10 +287,6 @@ void networkTask(void*) {
     Peer sender, receiver;
     sos::SequenceTracker sequence;
     uint32_t lastRetry = 0, lastValidAudio = 0;
-#if SOS_METRICS
-    uint32_t lastStackProbeMs = 0;
-    uint32_t lastUplinkArrival = 0, lastUplinkSource = 0;
-#endif
     uint32_t nextDownlinkAttemptMs = 0;
     uint32_t downlinkBackoffMs = 10;
     bool socketsReady = false;
@@ -355,9 +321,6 @@ void networkTask(void*) {
     auto invalidateSender = [&] {
         sender = Peer{};
         sequence.reset();
-#if SOS_METRICS
-        lastUplinkArrival = lastUplinkSource = 0;
-#endif
         ++uplinkEpoch;
     };
     for (;;) {
@@ -370,19 +333,6 @@ void networkTask(void*) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
-        // #region debug-point F:network-stack
-        // uxTaskGetStackHighWaterMark scans the whole 16 KB stack. Probing at
-        // the full 1 kHz loop rate would burn CPU on Core 0; the high-water
-        // mark is monotonic, so a 500 ms sample keeps full diagnostic value.
-#if SOS_METRICS
-        const uint32_t probeMs = millis();
-        if (uint32_t(probeMs - lastStackProbeMs) >= 500) {
-            lastStackProbeMs = probeMs;
-            debugNetworkStackMin.store(std::min(debugNetworkStackMin.load(),
-                uint32_t(uxTaskGetStackHighWaterMark(nullptr))));
-        }
-#endif
-        // #endregion
         const uint32_t now = millis();
         if (WiFi.status() != WL_CONNECTED ||
             (socketsReady && boundIp != WiFi.localIP())) {
@@ -437,9 +387,6 @@ void networkTask(void*) {
                         peer = {ip, port, h.session, now};
                         if (changed && h.flags == sos::Sender) {
                             sequence.reset();
-#if SOS_METRICS
-                            lastUplinkArrival = lastUplinkSource = 0;
-#endif
                             ++uplinkEpoch;
                         } else if (changed && h.flags == sos::Receiver) {
                             captured.clear();
@@ -471,111 +418,48 @@ void networkTask(void*) {
                 if (uint32_t(now - lastValidAudio) >= sos::kAudioTimeoutMs) sequence.reset();
                 if (sequence.accept(h.sequence, sos::decodePcm(packet.data() + sos::kHeaderSize),
                                     [](const sos::Frame& f) { microphone.push(f); })) {
-#if SOS_METRICS
-                    if (lastUplinkArrival != 0) {
-                        debugUplinkArrivalMax.store(std::max(
-                            debugUplinkArrivalMax.load(), uint32_t(now - lastUplinkArrival)));
-                        debugUplinkSourceMax.store(std::max(
-                            debugUplinkSourceMax.load(),
-                            uint32_t(h.timestampMs - lastUplinkSource)));
-                    }
-                    lastUplinkArrival = now;
-                    lastUplinkSource = h.timestampMs;
-#endif
                     lastValidAudio = now;
                     lastUplinkMs.store(now, std::memory_order_release);
-#if SOS_METRICS
-                    ++receivedPackets;
-                    // #region debug-point P-S:uplink-gaps
-                    debugUplinkLost.store(sequence.lost);
-                    debugUplinkGapMax.store(sequence.maxGap);
-                    debugUplinkBridged.store(sequence.bridged);
-                    // #endregion
-#endif
                 }
             }
         }
 
-        // On congestion, back off and resume from the newest frame. Retrying an
-        // old frame creates a send/log storm and can never catch real time.
-#if SOS_METRICS
-        uint32_t sentThisLoop = 0;
-#endif
+        // Keep every produced frame and catch up at 4 ms per packet against a
+        // 20 ms production period: the phone playout buffer absorbs the burst
+        // with no audible hole, while dropping to the newest frame punched a
+        // 20 ms gap into the stream for every scheduler hiccup. On real
+        // congestion (endPacket fails) drop the frame -- retransmitting into
+        // a congested queue amplifies the loss.
         const uint32_t attemptNow = millis();
         if (!socketsReady || !receiver.active(attemptNow)) {
             captured.clear();
             nextDownlinkAttemptMs = attemptNow;
             downlinkBackoffMs = 10;
         } else if (int32_t(attemptNow - nextDownlinkAttemptMs) >= 0) {
-            const uint32_t queued = captured.size();
-            if (queued > 1) {
-                captured.discard(queued - 1);
-#if SOS_METRICS
-                debugSuperseded.fetch_add(queued - 1);
-#endif
-            }
             if (captured.pop(pendingDownlink)) {
-                const uint32_t frameAge = uint32_t(attemptNow - pendingDownlink.capturedMs);
-#if SOS_METRICS
-                // #region debug-point D:network-burst
-                debugFrameAgeMax.store(std::max(debugFrameAgeMax.load(), frameAge));
-                // #endregion
-#endif
-                if (frameAge > 300) {
-#if SOS_METRICS
-                    ++debugStaleDrops;
-#endif
-                    nextDownlinkAttemptMs = attemptNow + 1;
+                const int encoded = opus_encode(
+                    opusEncoder, pendingDownlink.pcm.data(), int(sos::kOpusFrameSamples),
+                    packet.data() + sos::kHeaderSize, int(sos::kOpusMaxBytes));
+                if (encoded <= 0) {
+                    nextDownlinkAttemptMs = attemptNow + sos::kOpusFrameDurationMs;
                 } else {
-                    const int encoded = opus_encode(
-                        opusEncoder, pendingDownlink.pcm.data(), int(sos::kOpusFrameSamples),
-                        packet.data() + sos::kHeaderSize, int(sos::kOpusMaxBytes));
-                    if (encoded <= 0) {
-#if SOS_METRICS
-                        ++debugOpusErrors;
-#endif
-                        nextDownlinkAttemptMs = attemptNow + sos::kOpusFrameDurationMs;
+                    sos::Header h{sos::Kind::AudioOpus, 0, bootSession,
+                                  pendingDownlink.sequence, pendingDownlink.capturedMs,
+                                  uint16_t(encoded)};
+                    const auto bytes = sos::encode(packet.data(), h);
+                    const bool begun = audio.beginPacket(receiver.ip, receiver.port);
+                    if (begun) audio.write(packet.data(), bytes);
+                    if (begun && audio.endPacket()) {
+                        downlinkBackoffMs = 10;
+                        nextDownlinkAttemptMs = attemptNow + 4;
                     } else {
-#if SOS_METRICS
-                        debugOpusBytesMin.store(std::min(debugOpusBytesMin.load(), uint32_t(encoded)));
-                        debugOpusBytesMax.store(std::max(debugOpusBytesMax.load(), uint32_t(encoded)));
-                        ++sentThisLoop;
-#endif
-                        sos::Header h{sos::Kind::AudioOpus, 0, bootSession,
-                                      pendingDownlink.sequence, pendingDownlink.capturedMs,
-                                      uint16_t(encoded)};
-                        const auto bytes = sos::encode(packet.data(), h);
-                        const bool begun = audio.beginPacket(receiver.ip, receiver.port);
-                        if (begun) audio.write(packet.data(), bytes);
-                        // #region debug-point A:udp-send-result
-                        if (begun && audio.endPacket()) {
-#if SOS_METRICS
-                            ++sentPackets;
-                            debugUdpFailureBurst.store(0);
-#endif
-                            downlinkBackoffMs = 10;
-                            nextDownlinkAttemptMs = attemptNow + 4;
-                        } else {
-#if SOS_METRICS
-                            ++debugUdpFailures;
-                            const uint32_t burst = debugUdpFailureBurst.fetch_add(1) + 1;
-                            debugUdpFailureBurstMax.store(
-                                std::max(debugUdpFailureBurstMax.load(), burst));
-#endif
-                            nextDownlinkAttemptMs = attemptNow + downlinkBackoffMs;
-                            downlinkBackoffMs =
-                                std::min(downlinkBackoffMs * 2, uint32_t(100));
-                        }
-                        // #endregion
+                        nextDownlinkAttemptMs = attemptNow + downlinkBackoffMs;
+                        downlinkBackoffMs =
+                            std::min(downlinkBackoffMs * 2, uint32_t(100));
                     }
                 }
             }
         }
-#if SOS_METRICS
-        // #region debug-point D:network-burst
-        debugSendBatchMax.store(std::max(debugSendBatchMax.load(), sentThisLoop));
-        // #endregion
-#endif
         // With a subscriber the socket poll stays at 1 kHz. With no sockets
         // there is nothing to parse and reconnect is timer-driven, so 20 Hz
         // is plenty; otherwise keep 5 ms discovery responsiveness without
@@ -621,7 +505,14 @@ void setup() {
     // The descriptor reserves 49 samples, but flow control sends exactly
     // 48 stereo samples (192 bytes) per 1 ms frame at 48 kHz.
     config.enable_ep_in_flow_control = true;
-    config.fifo_packets = 16;
+    // The IN flow control zero-pads -- an audible click -- as soon as the ISR
+    // outruns the supply task, so the steady FIFO level IS the stall budget:
+    // 16 packets covered the observed 5-6 ms scheduling jitter but not the
+    // rarer longer stalls (flash cache misses, WiFi internals) that surfaced
+    // as occasional DAW->phone clicks. 48 packets lift the budget to ~47 ms
+    // for ~32 ms more uplink latency, hidden by the 300 ms playout buffer;
+    // bufferRx() grows the same way and only ever dropped while full.
+    config.fifo_packets = 48;
     config.rx_start_fill_percent = 0;
     // Host volume controls the phone-playback (USB OUT) path in audioTask.
     // Enabling this library option would instead scale USB IN microphone data.
@@ -717,60 +608,4 @@ void loop() {
             ESP.restart();
         }
     }
-
-#if SOS_METRICS
-    static uint32_t lastDebugMs = millis();
-    const bool usbAudioActive =
-        usb.isStreamingActiveTx() || usb.isStreamingActiveRx();
-    if (usbAudioActive || uint32_t(now - lastDebugMs) < 5000) return;
-    lastDebugMs = now;
-    // #region debug-point P-Q-R-S:serial-snapshot
-    Serial.printf("[DEBUG] session=daw-phone-stutter run=post-fix-periodic hypotheses=P,Q,R,S,T,U,V "
-        "wifi=%d rssi=%d usb=%d tx=%d rx=%d up=%lu down=%lu under=%lu trim=%lu overflow=%lu drop=%lu "
-        "mic=%lu..%lu usbTx=%lu..%lu usbTxPacket=%u usbRx=%lu..%lu "
-        "audioLoopGapMax=%lu usbTxGapMax=%lu usbTxAdvanceMax=%lu usbTxDone=%lu..%lu "
-        "usbVol=%u/%u usbMute=%u/%u "
-        "usbRxDrop=%lu txXfer=%lu rxXfer=%lu "
-        "capPeak=%lu sendBatch=%lu frameAgeMax=%lu stale=%lu superseded=%lu "
-        "upLost=%lu upGap=%lu upBridge=%lu "
-        "upArrivalMax=%lu upSourceMax=%lu "
-        "udpFail=%lu udpFailBurst=%lu opusBytes=%lu..%lu opusErr=%lu "
-        "netStackMin=%lu queueCap=%u target=%u "
-        "heap=%u minHeap=%u maxBlock=%u "
-        "psramFree=%u psramTotal=%u\n",
-        int(WiFi.status()), WiFi.RSSI(), int(usb.mounted()), int(usb.isStreamingActiveTx()),
-        int(usb.isStreamingActiveRx()), (unsigned long)receivedPackets.load(),
-        (unsigned long)sentPackets.load(), (unsigned long)microphone.underruns.load(),
-        (unsigned long)microphone.trims.load(), (unsigned long)microphone.overflows.load(),
-        (unsigned long)capturedDrops.load(),
-        (unsigned long)debugMicMin.exchange(UINT32_MAX), (unsigned long)debugMicMax.exchange(0),
-        (unsigned long)debugUsbTxMin.exchange(UINT32_MAX), (unsigned long)debugUsbTxMax.exchange(0),
-        unsigned(usb.getTxFrameBytesLast()),
-        (unsigned long)debugUsbRxMin.exchange(UINT32_MAX), (unsigned long)debugUsbRxMax.exchange(0),
-        (unsigned long)debugAudioLoopGapMax.exchange(0),
-        (unsigned long)debugUsbTxProgressGapMax.exchange(0),
-        (unsigned long)debugUsbTxAdvanceMax.exchange(0),
-        (unsigned long)debugUsbTxDoneMin.exchange(UINT32_MAX),
-        (unsigned long)debugUsbTxDoneMax.exchange(0),
-        unsigned((usbSpeakerLeftGainQ16.load() * 100 + 32768) >> 16),
-        unsigned((usbSpeakerRightGainQ16.load() * 100 + 32768) >> 16),
-        unsigned(usbSpeakerLeftMuted.load()), unsigned(usbSpeakerRightMuted.load()),
-        (unsigned long)usb.getRxDroppedBytes(), (unsigned long)usb.getTxXferCount(),
-        (unsigned long)usb.getRxXferCount(), (unsigned long)debugCapturePeak.exchange(0),
-        (unsigned long)debugSendBatchMax.exchange(0), (unsigned long)debugFrameAgeMax.exchange(0),
-        (unsigned long)debugStaleDrops.load(), (unsigned long)debugSuperseded.load(),
-        (unsigned long)debugUplinkLost.load(),
-        (unsigned long)debugUplinkGapMax.load(),
-        (unsigned long)debugUplinkBridged.load(),
-        (unsigned long)debugUplinkArrivalMax.exchange(0),
-        (unsigned long)debugUplinkSourceMax.exchange(0),
-        (unsigned long)debugUdpFailures.load(), (unsigned long)debugUdpFailureBurstMax.load(),
-        (unsigned long)debugOpusBytesMin.exchange(UINT32_MAX),
-        (unsigned long)debugOpusBytesMax.exchange(0), (unsigned long)debugOpusErrors.load(),
-        (unsigned long)debugNetworkStackMin.load(),
-        unsigned(sos::MonoPlayout::queueCapacity), unsigned(sos::MonoPlayout::target),
-        ESP.getFreeHeap(), ESP.getMinFreeHeap(),
-        ESP.getMaxAllocHeap(), ESP.getFreePsram(), ESP.getPsramSize());
-    // #endregion
-#endif
 }

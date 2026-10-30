@@ -138,7 +138,6 @@ void Transport::run() {
         uint32_t peerBoot = 0, selectedAt = 0, lastAck = 0, lastAudio = 0;
         uint32_t lastDiscover = nowMs() - 1000, lastSubscribe = nowMs() - 1000;
         uint32_t lastInterfaceRefresh = nowMs();
-        uint32_t nextAudioSend = nowMs();
         bool wasEnabled = false, haveAck = false, haveAudio = false;
         bool sequenceValid = false;
         uint32_t nextSequence = 0;
@@ -152,7 +151,6 @@ void Transport::run() {
         };
         auto clearPeer = [&] {
             outgoing_.clear();
-            nextAudioSend = nowMs();
             peerIp.clear();
             peerBoot = 0;
             haveAck = haveAudio = false;
@@ -222,7 +220,6 @@ void Transport::run() {
             }
             if (enabled != wasEnabled) {
                 outgoing_.clear();
-                nextAudioSend = now;
                 haveAck = haveAudio = false;
                 resetReceiveState();
                 invalidateAudio();
@@ -371,32 +368,31 @@ void Transport::run() {
                 }
             }
 
-            const uint32_t sendNow = nowMs();
-            if (sending_ && int32_t(sendNow - nextAudioSend) >= 0 && outgoing_.size() > 0) {
-                const uint32_t queued = outgoing_.size();
-                if (queued > 1) {
-                    outgoing_.discard(queued - 1);
-                    dropped.fetch_add(queued - 1);
-                }
+            if (sending_) {
+                // Send every queued frame in FIFO order instead of keeping only
+                // the newest: a dropped frame has already burned its sequence
+                // number, so the receiver treats sender-side backlog trimming as
+                // packet loss and synthesizes audible concealment audio. The
+                // 300 ms playout buffer absorbs the resulting bursts, and only
+                // truly stale frames (real content that can never be sent in
+                // time) are dropped here.
+                const uint32_t sendNow = nowMs();
                 Outgoing frame;
-                if (outgoing_.pop(frame)) {
-                    nextAudioSend += sos::kFrameDurationMs;
-                    if (int32_t(sendNow - nextAudioSend) >= 0)
-                        nextAudioSend = sendNow + sos::kFrameDurationMs;
+                for (int budget = 8; budget > 0 && outgoing_.pop(frame); --budget) {
                     if (!enabled || !connected() ||
                         uint32_t(sendNow - frame.timeMs) > 300) {
                         ++dropped;
-                    } else {
-                        sos::Header h{sos::Kind::Audio, 0, session_, frame.sequence, frame.timeMs,
-                                      uint16_t(sos::kFrameBytes)};
-                        const auto bytes = int(sos::encode(packet.data(), h));
-                        sos::encodePcm(packet.data() + sos::kHeaderSize, frame.pcm);
-                        if (socket.waitUntilReady(false, 0) == 1 &&
-                            socket.write(peerIp, sos::kUplinkPort, packet.data(), bytes) == bytes)
-                            ++sent;
-                        else
-                            ++socketErrors;
+                        continue;
                     }
+                    sos::Header h{sos::Kind::Audio, 0, session_, frame.sequence,
+                                  frame.timeMs, uint16_t(sos::kFrameBytes)};
+                    const auto bytes = int(sos::encode(packet.data(), h));
+                    sos::encodePcm(packet.data() + sos::kHeaderSize, frame.pcm);
+                    if (socket.waitUntilReady(false, 0) == 1 &&
+                        socket.write(peerIp, sos::kUplinkPort, packet.data(), bytes) == bytes)
+                        ++sent;
+                    else
+                        ++socketErrors;
                 }
             }
         }
