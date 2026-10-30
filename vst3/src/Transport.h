@@ -15,7 +15,7 @@ public:
     juce::String preferredDevice() const;
     juce::String status() const;
     std::vector<Device> devices() const;
-    void enqueue(const sos::Frame&, uint32_t now, uint32_t sequence);
+    void enqueue(const sos::Frame&, uint32_t now);
     void setReceiveSampleRate(double outputRate) {
         const auto safeRate = outputRate > 0.0 ? outputRate : double(sos::kSampleRate);
         incoming_.setNominalRatio(float(double(sos::kSampleRate) / safeRate));
@@ -33,12 +33,15 @@ public:
 private:
     struct Outgoing {
         sos::Frame pcm{};
-        uint32_t timeMs = 0, sequence = 0;
+        uint32_t timeMs = 0;
     };
     void run() override;
     void invalidateAudio();
     const bool sending_;
     const uint32_t session_;
+    // Send-time sequence assignment: only run() touches this, so the
+    // receiver's numbers always count exactly what went on the wire.
+    uint32_t sendSequence_ = 0;
     std::atomic<bool> enabled_{false};
     std::atomic<State> state_{State::Searching};
     std::atomic<uint32_t> discoveryInterfaces_{0};

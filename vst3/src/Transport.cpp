@@ -69,8 +69,8 @@ juce::String Transport::status() const {
     return text;
 }
 
-void Transport::enqueue(const sos::Frame& pcm, uint32_t now, uint32_t sequence) {
-    const Outgoing frame{pcm, now, sequence};
+void Transport::enqueue(const sos::Frame& pcm, uint32_t now) {
+    const Outgoing frame{pcm, now};
     if (!outgoing_.push(&frame, 1)) ++dropped;
 }
 
@@ -369,22 +369,23 @@ void Transport::run() {
             }
 
             if (sending_) {
-                // Send every queued frame in FIFO order instead of keeping only
-                // the newest: a dropped frame has already burned its sequence
-                // number, so the receiver treats sender-side backlog trimming as
-                // packet loss and synthesizes audible concealment audio. The
-                // 300 ms playout buffer absorbs the resulting bursts, and only
-                // truly stale frames (real content that can never be sent in
-                // time) are dropped here.
+                // Send-time sequence assignment: a frame dropped here (stale,
+                // disconnected, disabled) or in enqueue (queue full) never
+                // burns a number, so sender-side trimming can never masquerade
+                // as packet loss and the receiver only ever sees gaps from the
+                // network itself. The budget clears several cycles of backlog
+                // in one pass, but stays at 16 packets so a burst never
+                // outruns the ESP32-side drain rate (16 packets per poll) and
+                // overflows its socket buffers into real packet loss.
                 const uint32_t sendNow = nowMs();
                 Outgoing frame;
-                for (int budget = 8; budget > 0 && outgoing_.pop(frame); --budget) {
+                for (int budget = 16; budget > 0 && outgoing_.pop(frame); --budget) {
                     if (!enabled || !connected() ||
                         uint32_t(sendNow - frame.timeMs) > 300) {
                         ++dropped;
                         continue;
                     }
-                    sos::Header h{sos::Kind::Audio, 0, session_, frame.sequence,
+                    sos::Header h{sos::Kind::Audio, 0, session_, sendSequence_++,
                                   frame.timeMs, uint16_t(sos::kFrameBytes)};
                     const auto bytes = int(sos::encode(packet.data(), h));
                     sos::encodePcm(packet.data() + sos::kHeaderSize, frame.pcm);

@@ -47,7 +47,7 @@ private:
     juce::SmoothedValue<float> gain_;
     sos::Frame pending_{};
     size_t pendingSamples_ = 0;
-    uint32_t sequence_ = 0, lastBlockMs_ = 0;
+    uint32_t lastBlockMs_ = 0;
     uint64_t sendInputIndex_ = 0;
     double dawSampleRate_ = sos::kSampleRate;
     double sendStep_ = 1.0, nextSendOutputPosition_ = 0.0;

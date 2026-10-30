@@ -48,7 +48,7 @@ void BridgeProcessor::resetSendResampler() {
 void BridgeProcessor::appendNetworkSample(float sample, uint32_t now) {
     pending_[pendingSamples_++] = sos::pcm16(sample);
     if (pendingSamples_ == pending_.size()) {
-        network.enqueue(pending_, now, sequence_++);
+        network.enqueue(pending_, now);
         pendingSamples_ = 0;
     }
 }

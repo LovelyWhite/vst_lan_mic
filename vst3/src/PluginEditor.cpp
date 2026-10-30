@@ -4,14 +4,11 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
     : AudioProcessorEditor(processor), processor_(processor) {
     title_.setText(processor.getName(), juce::dontSendNotification);
     title_.setFont(juce::FontOptions(28.0f, juce::Font::bold));
-    direction_.setText(BridgeProcessor::sending ? "DAW -> ESP32 -> phone microphone"
-                                                : "Phone playback -> ESP32 -> DAW",
+    direction_.setText(BridgeProcessor::sending ? "DAW -> net -> Lan mic"
+                                                : "Lan mic playback -> net -> DAW",
                        juce::dontSendNotification);
     deviceLabel_.setText("Device", juce::dontSendNotification);
     gainLabel_.setText("Network gain", juce::dontSendNotification);
-    hint_.setText("Auto sample-rate conversion | 48 kHz network stereo | Stereo USB",
-                  juce::dontSendNotification);
-    hint_.setColour(juce::Label::textColourId, juce::Colours::lightgrey);
     status_.setMinimumHorizontalScale(0.65f);
     gain_.setSliderStyle(juce::Slider::LinearHorizontal);
     gain_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 90, 24);
