@@ -1,0 +1,9 @@
+LAN MIC 插件安装程序
+
+本安装包将把 LAN MIC 系列插件（VST3）安装到系统插件目录：
+
+    /Library/Audio/Plug-Ins/VST3
+
+安装过程需要输入管理员密码。
+
+完成后请重启 DAW，或在 DAW 的插件列表中重新扫描。

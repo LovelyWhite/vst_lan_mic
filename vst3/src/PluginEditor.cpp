@@ -14,7 +14,7 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
     gain_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 90, 24);
     gain_.setTextValueSuffix(" dB");
     for (auto* component : {&title_, &direction_, &deviceLabel_,
-                            &gainLabel_, &status_, &counters_, &hint_})
+                            &gainLabel_, &status_, &counters_})
         addAndMakeVisible(component);
     addAndMakeVisible(device_);
     addAndMakeVisible(gain_);
@@ -56,7 +56,6 @@ void BridgeEditor::resized() {
     enabled_.setBounds(switches.removeFromLeft(210));
     status_.setBounds(area.removeFromTop(28));
     counters_.setBounds(area.removeFromTop(25));
-    hint_.setBounds(area.removeFromTop(24));
 }
 
 void BridgeEditor::timerCallback() {

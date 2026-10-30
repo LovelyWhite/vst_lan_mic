@@ -1,7 +1,9 @@
 build/
 build-*/
+dist/
 .DS_Store
 .venv/
 __pycache__/
 .vs/
 esp32s3/include/WifiConfig.h
+.trae*
