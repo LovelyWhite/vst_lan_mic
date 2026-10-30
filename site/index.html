@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LAN MIC · 把手机变成 DAW 的无线麦克风与监听 — suxitech</title>
+<title>LAN MIC</title>
 <meta name="description" content="LAN MIC：suxitech 出品的局域网音频桥，通过两个 VST3 插件实现 DAW 与手机之间的双向无线音频传输。">
 <style>
   :root {
@@ -338,15 +338,16 @@
 <header class="hero" id="top">
   <div class="wrap">
     <div class="badge"><span class="dot"></span>LAN MIC 设备 · Wi-Fi · VST3 · UAC2</div>
-    <h1>让手机成为 DAW 的<br><span class="grad">无线麦克风与监听器</span></h1>
+    <h1>把 DAW 的声卡效果<br><span class="grad">无线输出到手机</span></h1>
     <p class="lead">
       LAN MIC 把手机变成电脑 DAW 的外置 USB 耳麦：
       DAW 里的声音无线上送到手机麦克风，手机播放的声音无线回传到 DAW。
       无需固定 IP，插上即用。
     </p>
     <div class="cta-row">
-      <a class="btn btn-primary" href="#quickstart">快速开始 →</a>
-      <a class="btn btn-ghost" href="#install">下载安装包</a>
+      <a class="btn btn-primary" href="https://h5.m.goofish.com/item?forceFlush=1&itemId=1096476773651&hitNativeDetail=true&xy_refer=%7B%22campaignId%22%3A1119%2C%22sceneInfo%22%3A%22share.detail.1096476773651.copy%22%7D&needNotPreGet=true&id=1096476773651&from_kun_share=default&ut_sk=1.ZQ2VoS7bGmgDAMa%2FLCc6E4ua_12431167_1793381458959.copy.detail.1096476773651.2810437150&ownerId=177b80d62c016a902c2539804a5399fa&un=cd04e884960136f8b0ea5e6b515c0e5c&share_crt_v=1&un_site=77&spm=a2159r.13376460.0.0&sp_tk=R1VERlRBV21GdFg%3D&bc_fl_src=share-1041550271227812-2-1&cpp=1&shareurl=true&short_name=h.jg3u1e2&bxsign=scdvNfJ66edHsfoZICTe1GLnLU7hJ_QI_H5kBI8QJKK1IdkbX5tMfyX6Zv8VqSrrIzLbFJKU_XVL4CuVjfLnvEMi6x3XMMz8ttIQafENXT6tgCTwwlZRHq3IB8l3l0Q1shG&tk=GUDFTAWmFtX&app=weixin&wechat_flag=1" target="_blank" rel="noopener">购买设备</a>
+      <a class="btn btn-ghost" href="#quickstart">快速开始 →</a>
+      <a class="btn btn-ghost" href="#install">下载vst3插件</a>
     </div>
 
     <div class="flow">
@@ -408,11 +409,6 @@
         <p>独立网络线程 + 原子同步有界队列，电脑端无锁；短丢包平滑补偿、欠载淡出、延迟积累自动裁剪。</p>
       </div>
       <div class="card">
-        <div class="ico">🎛️</div>
-        <h3>工程内保存配置</h3>
-        <p>设备选择、增益、启停状态随工程保存恢复；Return 插件无需打开界面即可自动续约接收。</p>
-      </div>
-      <div class="card">
         <div class="ico">🔋</div>
         <h3>智能省电</h3>
         <p>设备在 USB 音频空闲时自动休眠省电，音频流恢复瞬间唤醒，待机不影响使用。</p>
@@ -471,7 +467,7 @@
         <div>
           <h3>连接硬件与网络</h3>
           <ul>
-            <li>用<b>支持数据的 OTG 线</b>将 LAN MIC 设备与手机相连；供电不足时使用有源 USB Hub。</li>
+            <li>设备自带 Type-C 公头，<b>直接插入手机</b>即可；供电不足时使用有源 USB Hub。</li>
             <li>设备与电脑接入<b>同一局域网</b>；设备使用 2.4 GHz Wi-Fi，请关闭路由器 AP 客户端隔离。</li>
             <li>在手机上选择 LAN MIC 设备作为外置 USB 麦克风/耳麦。</li>
           </ul>
@@ -532,8 +528,8 @@
         </div>
         <h3>macOS</h3>
         <p>双击 pkg 安装包，向导式安装到系统 VST3 插件目录<br>支持 Intel 与 Apple Silicon</p>
-        <span class="dl-file">LANMIC_macOS.pkg</span>
-        <a class="btn btn-primary" href="LANMIC_macOS.pkg" download>
+        <span class="dl-file">LANMIC_0.1.0.pkg</span>
+        <a class="btn btn-primary" href="LANMIC_0.1.0.pkg" download>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5v8.5M4.2 6.8 8 10.6l3.8-3.8M2.5 14h11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           下载 macOS 版
         </a>
@@ -544,8 +540,8 @@
         </div>
         <h3>Windows</h3>
         <p>双击 exe 安装器，可选「为所有人 / 仅为我」安装<br>到系统 VST3 插件目录</p>
-        <span class="dl-file">LANMIC_Windows.exe</span>
-        <a class="btn btn-primary" href="LANMIC_Windows.exe" download>
+        <span class="dl-file">LANMIC_Setup_0.1.0.exe</span>
+        <a class="btn btn-primary" href="LANMIC_Setup_0.1.0.exe" download>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5v8.5M4.2 6.8 8 10.6l3.8-3.8M2.5 14h11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           下载 Windows 版
         </a>
@@ -553,10 +549,10 @@
     </div>
 
     <div class="note">
-      <b>首次使用：</b>安装完成后启动 DAW 并重新扫描插件；若之前有旧版本插件，请先删除插件目录中的旧 bundle 再扫描。
+      <b>购买设备：</b>VST3 插件随 LAN MIC 设备免费提供，<a href="https://h5.m.goofish.com/item?forceFlush=1&itemId=1096476773651&hitNativeDetail=true&xy_refer=%7B%22campaignId%22%3A1119%2C%22sceneInfo%22%3A%22share.detail.1096476773651.copy%22%7D&needNotPreGet=true&id=1096476773651&from_kun_share=default&ut_sk=1.ZQ2VoS7bGmgDAMa%2FLCc6E4ua_12431167_1793381458959.copy.detail.1096476773651.2810437150&ownerId=177b80d62c016a902c2539804a5399fa&un=cd04e884960136f8b0ea5e6b515c0e5c&share_crt_v=1&un_site=77&spm=a2159r.13376460.0.0&sp_tk=R1VERlRBV21GdFg%3D&bc_fl_src=share-1041550271227812-2-1&cpp=1&shareurl=true&short_name=h.jg3u1e2&bxsign=scdvNfJ66edHsfoZICTe1GLnLU7hJ_QI_H5kBI8QJKK1IdkbX5tMfyX6Zv8VqSrrIzLbFJKU_XVL4CuVjfLnvEMi6x3XMMz8ttIQafENXT6tgCTwwlZRHq3IB8l3l0Q1shG&tk=GUDFTAWmFtX&app=weixin&wechat_flag=1" target="_blank" rel="noopener">前往闲鱼购买 →</a>
     </div>
     <div class="note">
-      <b>Windows 防火墙：</b>将网络设为「专用」，允许 Studio One 收发 UDP；若插件显示 <code>Searching on 0 IPv4 interface(s)</code>，请检查本机网卡与防火墙设置。
+      <b>首次使用：</b>安装完成后启动 DAW 并重新扫描插件；若之前有旧版本插件，请先删除插件目录中的旧 bundle 再扫描。
     </div>
   </div>
 </section>
@@ -566,21 +562,21 @@
   <div class="wrap">
     <div class="section-head">
       <div class="kicker">Status LED</div>
-      <h2>指示灯状态一览</h2>
-      <p class="sub">设备指示灯是设备状态的唯一窗口，一眼判断链路卡在哪一步。</p>
+      <h2>小灯怎么看</h2>
+      <p class="sub">设备出状况别慌，看一眼小灯就知道它在干嘛。</p>
     </div>
     <div class="tbl-card">
       <table>
         <thead>
-          <tr><th>灯效</th><th>含义</th></tr>
+          <tr><th>灯怎么闪</th><th>它在干嘛</th></tr>
         </thead>
         <tbody>
-          <tr><td><span class="led"></span><b>快闪</b>（约 125 ms 翻转）</td><td>正在连接 Wi-Fi</td></tr>
-          <tr><td><span class="led"></span><b>慢闪</b>（约 500 ms 翻转）</td><td>开放配网热点，等待手机配置</td></tr>
-          <tr><td><span class="led"></span><b>常亮</b></td><td>Wi-Fi 已连接，等待音频流</td></tr>
-          <tr><td><span class="led"></span><b>每秒短闪</b>（亮约 100 ms）</td><td>USB 音频正在传输 —— 一切正常</td></tr>
-          <tr><td><span class="led"></span><b>极快闪</b></td><td>按键已长按 3 秒，可松开并清除配网凭据</td></tr>
-          <tr><td><span class="led"></span><b>每秒双闪</b></td><td>设备启动异常，请重新上电</td></tr>
+          <tr><td><span class="led"></span><b>闪得很快</b></td><td>正在连 Wi-Fi，稍等几秒就好</td></tr>
+          <tr><td><span class="led"></span><b>慢慢闪</b></td><td>在等你配网：手机连上它的热点「LAN MIC-xxx」，给它选好 Wi-Fi 就行</td></tr>
+          <tr><td><span class="led"></span><b>一直亮</b></td><td>Wi-Fi 连好了，随时可以开始用</td></tr>
+          <tr><td><span class="led"></span><b>一秒闪一下</b></td><td>正在传声音，一切正常 ✅</td></tr>
+          <tr><td><span class="led"></span><b>闪得飞快</b></td><td>你长按了按键 3 秒：松开就会忘记 Wi-Fi，重新配网</td></tr>
+          <tr><td><span class="led"></span><b>一秒闪两下</b></td><td>设备启动出错了，拔下来重新插一次</td></tr>
         </tbody>
       </table>
     </div>
@@ -598,7 +594,7 @@
     <div class="tbl-card">
       <table>
         <tbody>
-          <tr><td style="width:220px"><b>全平台兼容</b></td><td>设备提供标准 UAC2 USB 音频：Android 手机、iPhone（USB-C 直连；Lightning 通常需带供电的相机转接器）即插即用为无线麦克风/耳麦；插入 Windows / macOS / Linux 电脑也可直接作为外置声卡使用。不同系统/应用对双通道 USB 麦克风支持程度不一。</td></tr>
+          <tr><td style="width:220px"><b>全平台兼容</b></td><td>设备提供标准 UAC2 USB 音频：Android 手机、iPhone（USB-C 直接插入；Lightning 口需相机转接器）即插即用为无线麦克风/耳麦；插入 Windows / macOS / Linux 电脑也可直接作为外置声卡使用。不同系统/应用对双通道 USB 麦克风支持程度不一。</td></tr>
           <tr><td><b>应用采纳</b></td><td>系统枚举成功不代表所有通话/直播 App 都会采用该输入，部分应用可能强制使用内置麦克风或单声道。</td></tr>
           <tr><td><b>音量控制</b></td><td>iOS 的音量调节会平滑作用于回传链路；部分 Android 设备的音量行为由系统或应用决定。<code>Network gain</code> 只控制 DAW → 手机方向。</td></tr>
           <tr><td><b>网络安全</b></td><td>仅限可信局域网使用，不要映射端口到公网。</td></tr>
