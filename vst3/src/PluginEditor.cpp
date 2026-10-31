@@ -14,7 +14,7 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
     gain_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 90, 24);
     gain_.setTextValueSuffix(" dB");
     for (auto* component : {&title_, &direction_, &deviceLabel_,
-                            &gainLabel_, &status_, &counters_})
+                            &gainLabel_, &status_})
         addAndMakeVisible(component);
     addAndMakeVisible(device_);
     addAndMakeVisible(gain_);
@@ -29,7 +29,7 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
         processor_.network.setPreferredDevice(index >= 0 && index < deviceIds_.size()
                                                  ? deviceIds_[index] : juce::String{});
     };
-    setSize(620, 310);
+    setSize(620, 285);
     timerCallback();
     startTimerHz(4);
 }
@@ -55,7 +55,6 @@ void BridgeEditor::resized() {
     auto switches = area.removeFromTop(36);
     enabled_.setBounds(switches.removeFromLeft(210));
     status_.setBounds(area.removeFromTop(28));
-    counters_.setBounds(area.removeFromTop(25));
 }
 
 void BridgeEditor::timerCallback() {
@@ -74,12 +73,4 @@ void BridgeEditor::timerCallback() {
     device_.setSelectedId(selected.isEmpty() ? 1 : deviceIds_.indexOf(selected) + 2,
                           juce::dontSendNotification);
     status_.setText(processor_.displayStatus(), juce::dontSendNotification);
-    const auto& net = processor_.network;
-    counters_.setText("TX " + juce::String(net.sent.load()) +
-        "   RX " + juce::String(net.received.load()) +
-        "   Lost " + juce::String(net.lost.load()) +
-        "   Drop " + juce::String(net.dropped.load()) +
-        "   Under " + juce::String(net.underruns()) +
-        "   Trim " + juce::String(net.trims()) +
-        "   IO " + juce::String(net.socketErrors.load()), juce::dontSendNotification);
 }

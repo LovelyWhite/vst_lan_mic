@@ -71,7 +71,7 @@ juce::String Transport::status() const {
 
 void Transport::enqueue(const sos::Frame& pcm, uint32_t now) {
     const Outgoing frame{pcm, now};
-    if (!outgoing_.push(&frame, 1)) ++dropped;
+    outgoing_.push(&frame, 1);
 }
 
 void Transport::invalidateAudio() { ++audioEpoch_; }
@@ -101,7 +101,7 @@ void Transport::run() {
         if (codecStatus == OPUS_OK)
             codecStatus = opus_encoder_ctl(encoder, OPUS_SET_VBR(0));
         if (codecStatus == OPUS_OK)
-            codecStatus = opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(4));
+            codecStatus = opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(10));
         if (codecStatus == OPUS_OK)
             codecStatus = opus_encoder_ctl(encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
     }
@@ -111,7 +111,6 @@ void Transport::run() {
     if (!codecReady) {
         if (decoder) opus_decoder_destroy(decoder);
         if (encoder) opus_encoder_destroy(encoder);
-        ++socketErrors;
         state_ = State::SocketError;
         return;
     }
@@ -121,7 +120,6 @@ void Transport::run() {
         juce::DatagramSocket socket(true);
         if (!socket.bindToPort(0)) {
             state_ = State::SocketError;
-            ++socketErrors;
             wait(500);
             continue;
         }
@@ -183,17 +181,14 @@ void Transport::run() {
         auto sendControlOn = [&](juce::DatagramSocket& target,
                                  const juce::String& ip,
                                  sos::Kind kind,
-                                 uint16_t flags,
-                                 bool countError) {
+                                 uint16_t flags) {
             sos::Header h{kind, flags, session_, 0, nowMs(), 0};
             const auto bytes = int(sos::encode(packet.data(), h));
-            if (target.waitUntilReady(false, 0) != 1 ||
-                target.write(ip, sos::kDiscoveryPort, packet.data(), bytes) != bytes) {
-                if (countError) ++socketErrors;
-            }
+            if (target.waitUntilReady(false, 0) == 1)
+                target.write(ip, sos::kDiscoveryPort, packet.data(), bytes);
         };
         auto sendControl = [&](const juce::String& ip, sos::Kind kind, uint16_t flags) {
-            sendControlOn(socket, ip, kind, flags, true);
+            sendControlOn(socket, ip, kind, flags);
         };
         auto handleOffer = [&](const sos::Header& h,
                                const juce::String& source,
@@ -272,12 +267,12 @@ void Transport::run() {
                 sendControl("255.255.255.255", sos::Kind::Discover, 0);
                 for (auto& endpoint : discoveryEndpoints) {
                     sendControlOn(*endpoint.socket, "255.255.255.255",
-                                  sos::Kind::Discover, 0, false);
+                                  sos::Kind::Discover, 0);
                     if (!endpoint.directedBroadcast.isNull() &&
                         endpoint.directedBroadcast != juce::IPAddress::broadcast()) {
                         sendControlOn(*endpoint.socket,
                                       endpoint.directedBroadcast.toString(),
-                                      sos::Kind::Discover, 0, false);
+                                      sos::Kind::Discover, 0);
                     }
                 }
                 const juce::ScopedLock lock(settingsLock_);
@@ -306,7 +301,6 @@ void Transport::run() {
 
             const int ready = socket.waitUntilReady(true, 2);
             if (ready < 0) {
-                ++socketErrors;
                 clearPeer();
                 state_ = State::SocketError;
                 break;
@@ -338,11 +332,8 @@ void Transport::run() {
                         gap = h.sequence - nextSequence;
                         if (gap >= 0x80000000u) continue; // Duplicate or late packet.
                     }
-                    if (gap > 0) {
-                        lost.fetch_add(gap);
-                        if (gap > kMaxPlcFrames)
-                            opus_decoder_ctl(decoder, OPUS_RESET_STATE);
-                    }
+                    if (gap > kMaxPlcFrames)
+                        opus_decoder_ctl(decoder, OPUS_RESET_STATE);
 
                     bool decodeOk = true;
                     const uint32_t plcFrames = std::min(gap, kMaxPlcFrames);
@@ -357,10 +348,8 @@ void Transport::run() {
                             break;
                         }
                         if (!incoming_.queue.push(decoded.data(),
-                                uint32_t(samples) * sos::kOpusChannels)) {
-                            ++dropped;
+                                uint32_t(samples) * sos::kOpusChannels))
                             invalidateAudio();
-                        }
                     }
 
                     const int samples = decodeOk
@@ -369,14 +358,12 @@ void Transport::run() {
                                       int(sos::kOpusFrameSamples), 0)
                         : OPUS_INTERNAL_ERROR;
                     if (samples != int(sos::kOpusFrameSamples)) {
-                        ++dropped;
                         resetStreamState();
                         invalidateAudio();
                         continue;
                     }
                     if (!incoming_.queue.push(decoded.data(),
                             uint32_t(samples) * sos::kOpusChannels)) {
-                        ++dropped;
                         // A paused DAW must not replay old queued samples on resume.
                         invalidateAudio();
                     }
@@ -384,7 +371,6 @@ void Transport::run() {
                     sequenceValid = true;
                     lastAudio = now;
                     haveAudio = true;
-                    ++received;
                 }
             }
 
@@ -401,26 +387,20 @@ void Transport::run() {
                 Outgoing frame;
                 for (int budget = 16; budget > 0 && outgoing_.pop(frame); --budget) {
                     if (!enabled || !connected() ||
-                        uint32_t(sendNow - frame.timeMs) > 300) {
-                        ++dropped;
+                        uint32_t(sendNow - frame.timeMs) > 300)
                         continue;
-                    }
                     const int encoded = opus_encode(
                         encoder, frame.pcm.data(), int(sos::kOpusFrameSamples),
                         packet.data() + sos::kHeaderSize, int(sos::kOpusMaxBytes));
                     if (encoded <= 0) {
-                        ++dropped;
                         resetStreamState();
                         continue;
                     }
                     sos::Header h{sos::Kind::AudioOpus, 0, session_, sendSequence_++,
                                   frame.timeMs, uint16_t(encoded)};
                     const auto bytes = int(sos::encode(packet.data(), h));
-                    if (socket.waitUntilReady(false, 0) == 1 &&
-                        socket.write(peerIp, sos::kUplinkPort, packet.data(), bytes) == bytes)
-                        ++sent;
-                    else
-                        ++socketErrors;
+                    if (socket.waitUntilReady(false, 0) == 1)
+                        socket.write(peerIp, sos::kUplinkPort, packet.data(), bytes);
                 }
             }
         }

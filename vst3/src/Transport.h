@@ -26,10 +26,6 @@ public:
     void receiveSamples(float* out) { incoming_.next(out); }
     void clearReceive() { incoming_.reset(); }
 
-    std::atomic<uint32_t> sent{0}, received{0}, lost{0}, dropped{0}, socketErrors{0};
-    uint32_t underruns() const { return incoming_.underruns.load(); }
-    uint32_t trims() const { return incoming_.trims.load(); }
-
 private:
     struct Outgoing {
         sos::Frame pcm{};
@@ -40,7 +36,7 @@ private:
     const bool sending_;
     const uint32_t session_;
     // Send-time sequence assignment: only run() touches this, so the
-    // receiver's numbers always count exactly what went on the wire.
+    // receiver only ever sees gaps that really went on the wire.
     uint32_t sendSequence_ = 0;
     std::atomic<bool> enabled_{false};
     std::atomic<State> state_{State::Searching};
