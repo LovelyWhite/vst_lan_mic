@@ -4,3 +4,4 @@ build-*/
 .venv/
 .pio/
 .pio-core/
+.vscode

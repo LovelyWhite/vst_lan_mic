@@ -6,31 +6,31 @@
 
 namespace sos {
 constexpr uint32_t kMagic = 0x31534f53;
-// v7: phone-to-DAW downlink (AudioOpus) carries interleaved stereo; v6 was mono.
-constexpr uint8_t kVersion = 7;
+// v8: the DAW-to-device uplink switched from 14 ms mono PCM (kind Audio,
+// removed) to 20 ms mono Opus; v7 carried mono PCM uplink and Opus downlink.
+constexpr uint8_t kVersion = 8;
 constexpr uint16_t kDiscoveryPort = 45678;
 constexpr uint16_t kUplinkPort = 45679;
 constexpr uint32_t kSampleRate = 48000;
-// Fourteen USB milliseconds per packet reduce packet pressure while keeping
-// the complete IPv4 datagram below the 1500-byte Ethernet/Wi-Fi MTU.
-constexpr size_t kFrameSamples = 672;
-constexpr uint32_t kFrameDurationMs = 14;
-// Per-channel Opus frame length; the wire carries interleaved samples.
+// Both directions frame Opus at 20 ms / 960 samples per channel, keeping the
+// complete IPv4 datagram below the 1500-byte Ethernet/Wi-Fi MTU.
 constexpr size_t kOpusFrameSamples = 960;
 constexpr size_t kOpusChannels = 2;
 constexpr uint32_t kOpusFrameDurationMs = 20;
 // Stereo 192 kbps CBR over 20 ms is 480 bytes, still well inside the MTU.
 constexpr int kOpusBitrate = 192000;
+// Uplink (DAW -> device) Opus profile: mono at the same 20 ms framing.
+constexpr size_t kUplinkChannels = 1;
+constexpr int kUplinkBitrate = 128000;
 constexpr size_t kOpusMaxBytes = 512;
 constexpr size_t kHeaderSize = 28;
-constexpr size_t kFrameBytes = kFrameSamples * 2;
-constexpr size_t kMaxPacketSize = kHeaderSize + kFrameBytes;
+constexpr size_t kMaxPacketSize = kHeaderSize + kOpusMaxBytes;
 constexpr uint32_t kLeaseMs = 3500;
 constexpr uint32_t kAudioTimeoutMs = 500;
 constexpr const char* kDeviceName = "LAN MIC";
 
 enum class Kind : uint8_t {
-    Discover = 1, Offer = 2, Subscribe = 3, Ack = 4, Audio = 5, AudioOpus = 6
+    Discover = 1, Offer = 2, Subscribe = 3, Ack = 4, AudioOpus = 6
 };
 enum Role : uint16_t { Sender = 1, Receiver = 2, Busy = 0x8000 };
 
@@ -80,8 +80,6 @@ inline bool decode(const uint8_t* p, size_t size, Header& h) {
          get32(p + 16), get16(p + 24)};
     if (size != kHeaderSize + h.payloadBytes) return false;
     switch (h.kind) {
-        case Kind::Audio:
-            return h.flags == 0 && h.session != 0 && h.payloadBytes == kFrameBytes;
         case Kind::AudioOpus:
             return h.flags == 0 && h.session != 0 &&
                    h.payloadBytes > 0 && h.payloadBytes <= kOpusMaxBytes;
@@ -100,19 +98,8 @@ inline bool decode(const uint8_t* p, size_t size, Header& h) {
     return false;
 }
 
-// Uplink stays mono PCM; downlink Opus frames are interleaved stereo (L,R).
-using Frame = std::array<int16_t, kFrameSamples>;
+// Uplink (DAW -> device) is mono Opus; downlink Opus frames are interleaved
+// stereo (L,R). Frame holds one direction's per-channel sample count.
+using Frame = std::array<int16_t, kOpusFrameSamples>;
 using OpusFrame = std::array<int16_t, kOpusFrameSamples * kOpusChannels>;
-inline void encodePcm(uint8_t* p, const Frame& frame) {
-    for (size_t i = 0; i < frame.size(); ++i)
-        put16(p + i * 2, uint16_t(frame[i]));
-}
-inline Frame decodePcm(const uint8_t* p) {
-    Frame frame{};
-    for (size_t i = 0; i < frame.size(); ++i) {
-        const auto v = get16(p + i * 2);
-        frame[i] = int16_t(v < 32768 ? int32_t(v) : int32_t(v) - 65536);
-    }
-    return frame;
-}
 } // namespace sos

@@ -355,9 +355,9 @@
         <div class="flow-label">上行 DAW → 手机</div>
         <div class="node hl"><b>DAW</b><span>Studio One / 任意 VST3 宿主</span></div>
         <div class="arrow">→</div>
-        <div class="node hl"><b>LAN MIC Send</b><span>VST3 插件 · 单声道 PCM</span></div>
+        <div class="node hl"><b>LAN MIC Send</b><span>VST3 插件 · 单声道 Opus</span></div>
         <div class="arrow">→</div>
-        <div class="node"><b>Wi-Fi</b><span>48 kHz · 14 ms 帧</span></div>
+        <div class="node"><b>Wi-Fi</b><span>48 kHz · 20 ms Opus 帧</span></div>
         <div class="arrow">→</div>
         <div class="node"><b>LAN MIC 设备</b><span>UAC2 USB 耳麦</span></div>
         <div class="arrow">→</div>
@@ -401,7 +401,7 @@
       <div class="card">
         <div class="ico">🎧</div>
         <h3>真立体声回传</h3>
-        <p>下行链路保留手机左右声道分离，Opus 192 kbps 编码回传 DAW；上行链路低延迟单声道 PCM。</p>
+        <p>下行链路保留手机左右声道分离，Opus 192 kbps 编码回传 DAW；上行链路为低延迟单声道 Opus 128 kbps，两个方向丢包均由解码器智能补帧掩盖。</p>
       </div>
       <div class="card">
         <div class="ico">⚡</div>

@@ -86,12 +86,31 @@ void Transport::prepareReceive() {
 }
 
 void Transport::run() {
-    int decoderStatus = OPUS_OK;
+    int codecStatus = OPUS_OK;
     OpusDecoder* decoder = sending_
         ? nullptr
-        : opus_decoder_create(sos::kSampleRate, sos::kOpusChannels, &decoderStatus);
-    if (!sending_ && (!decoder || decoderStatus != OPUS_OK)) {
+        : opus_decoder_create(sos::kSampleRate, sos::kOpusChannels, &codecStatus);
+    OpusEncoder* encoder = sending_
+        ? opus_encoder_create(sos::kSampleRate, int(sos::kUplinkChannels),
+                              OPUS_APPLICATION_AUDIO, &codecStatus)
+        : nullptr;
+    if (sending_ && encoder && codecStatus == OPUS_OK) {
+        // Mirrors the firmware's downlink encoder profile; CBR keeps every
+        // uplink datagram at a predictable 320 bytes.
+        codecStatus = opus_encoder_ctl(encoder, OPUS_SET_BITRATE(sos::kUplinkBitrate));
+        if (codecStatus == OPUS_OK)
+            codecStatus = opus_encoder_ctl(encoder, OPUS_SET_VBR(0));
+        if (codecStatus == OPUS_OK)
+            codecStatus = opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(4));
+        if (codecStatus == OPUS_OK)
+            codecStatus = opus_encoder_ctl(encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+    }
+    const bool codecReady = sending_
+        ? encoder && codecStatus == OPUS_OK
+        : decoder && codecStatus == OPUS_OK;
+    if (!codecReady) {
         if (decoder) opus_decoder_destroy(decoder);
+        if (encoder) opus_encoder_destroy(encoder);
         ++socketErrors;
         state_ = State::SocketError;
         return;
@@ -145,9 +164,10 @@ void Transport::run() {
         sos::OpusFrame decoded{};
         const uint16_t role = sending_ ? sos::Sender : sos::Receiver;
 
-        auto resetReceiveState = [&] {
+        auto resetStreamState = [&] {
             sequenceValid = false;
             if (decoder) opus_decoder_ctl(decoder, OPUS_RESET_STATE);
+            if (encoder) opus_encoder_ctl(encoder, OPUS_RESET_STATE);
         };
         auto clearPeer = [&] {
             outgoing_.clear();
@@ -155,7 +175,7 @@ void Transport::run() {
             peerBoot = 0;
             haveAck = haveAudio = false;
             state_ = State::Searching;
-            resetReceiveState();
+            resetStreamState();
             invalidateAudio();
             const juce::ScopedLock lock(settingsLock_);
             selected_.clear();
@@ -221,7 +241,7 @@ void Transport::run() {
             if (enabled != wasEnabled) {
                 outgoing_.clear();
                 haveAck = haveAudio = false;
-                resetReceiveState();
+                resetStreamState();
                 invalidateAudio();
                 state_ = peerIp.isEmpty() ? State::Searching : State::Connecting;
                 selectedAt = now;
@@ -234,7 +254,7 @@ void Transport::run() {
             }
             if (haveAudio && uint32_t(now - lastAudio) >= sos::kAudioTimeoutMs) {
                 haveAudio = false;
-                resetReceiveState();
+                resetStreamState();
                 invalidateAudio();
             }
             // Discovery and stale-device pruning must keep running while a peer
@@ -306,7 +326,7 @@ void Transport::run() {
                     haveAck = true;
                     const bool busy = (h.flags & sos::Busy) != 0;
                     if (busy && state_.load() != State::Busy) {
-                        resetReceiveState();
+                        resetStreamState();
                         invalidateAudio();
                     }
                     state_ = busy ? State::Busy : State::Connected;
@@ -350,7 +370,7 @@ void Transport::run() {
                         : OPUS_INTERNAL_ERROR;
                     if (samples != int(sos::kOpusFrameSamples)) {
                         ++dropped;
-                        resetReceiveState();
+                        resetStreamState();
                         invalidateAudio();
                         continue;
                     }
@@ -385,10 +405,17 @@ void Transport::run() {
                         ++dropped;
                         continue;
                     }
-                    sos::Header h{sos::Kind::Audio, 0, session_, sendSequence_++,
-                                  frame.timeMs, uint16_t(sos::kFrameBytes)};
+                    const int encoded = opus_encode(
+                        encoder, frame.pcm.data(), int(sos::kOpusFrameSamples),
+                        packet.data() + sos::kHeaderSize, int(sos::kOpusMaxBytes));
+                    if (encoded <= 0) {
+                        ++dropped;
+                        resetStreamState();
+                        continue;
+                    }
+                    sos::Header h{sos::Kind::AudioOpus, 0, session_, sendSequence_++,
+                                  frame.timeMs, uint16_t(encoded)};
                     const auto bytes = int(sos::encode(packet.data(), h));
-                    sos::encodePcm(packet.data() + sos::kHeaderSize, frame.pcm);
                     if (socket.waitUntilReady(false, 0) == 1 &&
                         socket.write(peerIp, sos::kUplinkPort, packet.data(), bytes) == bytes)
                         ++sent;
@@ -402,4 +429,5 @@ void Transport::run() {
     }
     discoveryInterfaces_.store(0);
     if (decoder) opus_decoder_destroy(decoder);
+    if (encoder) opus_encoder_destroy(encoder);
 }

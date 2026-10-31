@@ -50,111 +50,6 @@ inline int16_t pcm16(float value) {
     return int16_t(std::max(-32768.0f, std::min(32767.0f, value * 32768.0f)));
 }
 
-// Run on the network thread. Reject duplicates/late packets, conceal gaps.
-class SequenceTracker {
-public:
-    void reset() { valid_ = false; lastSample_ = 0; prevSample_ = 0; }
-    // A gap wider than this is a stream restart: the 500 ms audio timeout
-    // resets this tracker long before the sequence can jump that far, so a
-    // larger delta resumes without concealment like a fresh stream.
-    static constexpr uint32_t kRestartGapFrames = 40;
-    template <typename Sink>
-    bool accept(uint32_t seq, const Frame& frame, Sink&& sink) {
-        if (valid_) {
-            const uint32_t delta = seq - next_;
-            if (delta >= 0x80000000u) return false;
-            if (delta > 0 && delta <= kRestartGapFrames) {
-                lost += delta;
-                maxGap = std::max(maxGap, delta);
-                bridged += delta;
-                next_ = seq + 1;
-                const int16_t prior = lastSample_;
-                lastSample_ = frame.back();
-                constexpr size_t fade = 48;  // 1 ms at 48 kHz
-                Frame scratch{};
-                if (delta <= 2) {
-                    // Glide linearly across a short gap. A bare ramp joins
-                    // both ends in value but leaves a step in the first
-                    // derivative, which cracks on loud passages, so the ramp
-                    // also carries the outgoing per-sample slope (decaying
-                    // exponentially: a pure linear extrapolation of a steep
-                    // waveform would run away within a few ms) and the real
-                    // frame fades in against the extended ramp, making the
-                    // join at frame.front() slope-continuous as well.
-                    const float start = float(prior);
-                    const float slope = float(prior) - float(prevSample_);
-                    const float bounded =
-                        std::max(-8000.0f, std::min(8000.0f, slope));
-                    const float span = float(frame.front()) - start;
-                    const float positions =
-                        float(delta * uint32_t(frame.size()) + 1);
-                    for (uint32_t m = 0; m < delta; ++m) {
-                        for (size_t i = 0; i < scratch.size(); ++i) {
-                            const uint32_t position =
-                                m * uint32_t(scratch.size()) + uint32_t(i) + 1;
-                            const float base =
-                                start + span * (float(position) / positions);
-                            const float tail = bounded * float(position) *
-                                std::exp(-float(position) / 12.0f);
-                            scratch[i] = int16_t(std::max(-32768.0f,
-                                std::min(32767.0f, base + tail)));
-                        }
-                        sink(scratch);
-                    }
-                    // Fade the real frame in over 1 ms against the extended
-                    // ramp; both boundaries touch the ramp continuously.
-                    Frame resume = frame;
-                    const float lineSlope = span / positions;
-                    for (size_t i = 0; i < fade; ++i) {
-                        const float weight = float(i + 1) / float(fade);
-                        const float extended =
-                            float(frame.front()) + lineSlope * float(i + 1);
-                        resume[i] = int16_t(float(frame[i]) * weight +
-                                            extended * (1.0f - weight));
-                    }
-                    sink(resume);
-                } else {
-                    // Conceal a wide gap with a 1 ms taper out, silence, and
-                    // a 1 ms taper back in. Tapering across a whole 14 ms
-                    // frame sweeps the full scale in one frame and reads as
-                    // a zip; 1 ms only rounds off the discontinuity. Both
-                    // taper boundaries that touch silence are exact zeros;
-                    // the residual taper step lands where signal is present
-                    // and is masked by it.
-                    for (size_t i = 0; i < fade; ++i)
-                        scratch[i] = int16_t(float(prior) *
-                            (1.0f - (float(i) + 1.0f) / float(fade)));
-                    sink(scratch);
-                    scratch.fill(0);
-                    for (uint32_t m = 1; m < delta; ++m) sink(scratch);
-                    // The real frame itself fades back in — sink it exactly
-                    // once, here, never again below.
-                    Frame resume = frame;
-                    for (size_t i = 0; i < fade; ++i)
-                        resume[i] = int16_t(float(frame[i]) *
-                            (float(i) / float(fade)));
-                    sink(resume);
-                }
-                // The slope estimate always comes from the last two samples
-                // of real received audio, never from synthesized concealment.
-                prevSample_ = frame[frame.size() - 2];
-                return true;
-            }
-        }
-        next_ = seq + 1;
-        valid_ = true;
-        prevSample_ = frame[frame.size() - 2];
-        lastSample_ = frame.back();
-        sink(frame);
-        return true;
-    }
-    uint32_t lost = 0, maxGap = 0, bridged = 0;
-private:
-    bool valid_ = false;
-    uint32_t next_ = 0;
-    int16_t lastSample_ = 0, prevSample_ = 0;
-};
-
 // Consumer-side elastic playout. A small continuous rate correction compensates
 // independent USB/DAW clocks; hard trimming bounds latency after a long stall.
 // The queue holds interleaved samples: mono (Channels == 1) or stereo L,R pairs
@@ -180,12 +75,12 @@ public:
     // when the protocol frame duration changes.
     static constexpr size_t queueCapacity = frameCapacity * size_t(Channels);
     static constexpr uint32_t targetFrames =
-        (targetMs + kFrameDurationMs - 1) / kFrameDurationMs;
+        (targetMs + kOpusFrameDurationMs - 1) / kOpusFrameDurationMs;
     static constexpr uint32_t target =
-        targetFrames * kFrameSamples * uint32_t(Channels);
+        targetFrames * kOpusFrameSamples * uint32_t(Channels);
     static constexpr uint32_t trimMargin =
-        uint32_t(queueCapacity) - target - kFrameSamples * uint32_t(Channels);
-    static_assert(target + kFrameSamples * uint32_t(Channels) < queueCapacity,
+        uint32_t(queueCapacity) - target - kOpusFrameSamples * uint32_t(Channels);
+    static_assert(target + kOpusFrameSamples * uint32_t(Channels) < queueCapacity,
                   "Playout queue is too small");
     SpscRing<int16_t, queueCapacity> queue;
     std::atomic<uint32_t> underruns{0}, trims{0}, overflows{0};

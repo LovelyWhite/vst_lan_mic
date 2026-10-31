@@ -36,6 +36,9 @@ constexpr uint32_t kWifiIdleSleepMs = 5000;
 constexpr uint32_t kUsbTxActiveTimeoutMs = 100;
 constexpr uint8_t kStatusLedPin = 18;
 constexpr bool kStatusLedActiveHigh = true;
+// Opus PLC synthesizes at most 300 ms of concealment; longer gaps reset the
+// decoder instead of padding with noise.
+constexpr uint32_t kMaxPlcFrames = 300 / sos::kOpusFrameDurationMs;
 
 audio_tools::USBAudioStream usb;
 constexpr uint32_t kUsbUnityGainQ16 = 65536;
@@ -285,7 +288,8 @@ void audioTask(void*) {
 void networkTask(void*) {
     WiFiUDP control, audio;
     Peer sender, receiver;
-    sos::SequenceTracker sequence;
+    bool uplinkSequenceValid = false;
+    uint32_t nextUplinkSequence = 0;
     uint32_t lastRetry = 0, lastValidAudio = 0;
     uint32_t nextDownlinkAttemptMs = 0;
     uint32_t downlinkBackoffMs = 10;
@@ -318,9 +322,32 @@ void networkTask(void*) {
         return;
     }
 
+    // Uplink decoder mirrors the plugin's mono 20 ms encoder profile; like the
+    // encoder it stays in internal RAM.
+    sos::Frame decoded{};
+    const int opusDecoderBytes = opus_decoder_get_size(sos::kUplinkChannels);
+    void* opusDecoderMemory = opusDecoderBytes > 0
+        ? heap_caps_malloc(size_t(opusDecoderBytes), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+        : nullptr;
+    auto* opusDecoder = static_cast<OpusDecoder*>(opusDecoderMemory);
+    int opusDecoderStatus = opusDecoder
+        ? opus_decoder_init(opusDecoder, sos::kSampleRate, sos::kUplinkChannels)
+        : OPUS_ALLOC_FAIL;
+    if (opusDecoderStatus != OPUS_OK) {
+        Serial.printf("Opus decoder initialization failed: %d\n", opusDecoderStatus);
+        if (opusMemory) heap_caps_free(opusMemory);
+        if (opusDecoderMemory) heap_caps_free(opusDecoderMemory);
+        vTaskDelete(nullptr);
+        return;
+    }
+    auto resetUplink = [&] {
+        uplinkSequenceValid = false;
+        opus_decoder_ctl(opusDecoder, OPUS_RESET_STATE);
+    };
+
     auto invalidateSender = [&] {
         sender = Peer{};
-        sequence.reset();
+        resetUplink();
         ++uplinkEpoch;
     };
     for (;;) {
@@ -386,7 +413,7 @@ void networkTask(void*) {
                         const bool changed = !peer.matches(ip, port, h.session);
                         peer = {ip, port, h.session, now};
                         if (changed && h.flags == sos::Sender) {
-                            sequence.reset();
+                            resetUplink();
                             ++uplinkEpoch;
                         } else if (changed && h.flags == sos::Receiver) {
                             captured.clear();
@@ -413,14 +440,44 @@ void networkTask(void*) {
                 const int got = audio.read(packet.data(), packet.size());
                 sos::Header h;
                 if (got != length || !sos::decode(packet.data(), size_t(got), h) ||
-                    h.kind != sos::Kind::Audio || !sender.active(now) ||
+                    h.kind != sos::Kind::AudioOpus || !sender.active(now) ||
                     !sender.matches(ip, port, h.session)) continue;
-                if (uint32_t(now - lastValidAudio) >= sos::kAudioTimeoutMs) sequence.reset();
-                if (sequence.accept(h.sequence, sos::decodePcm(packet.data() + sos::kHeaderSize),
-                                    [](const sos::Frame& f) { microphone.push(f); })) {
-                    lastValidAudio = now;
-                    lastUplinkMs.store(now, std::memory_order_release);
+                if (uint32_t(now - lastValidAudio) >= sos::kAudioTimeoutMs)
+                    uplinkSequenceValid = false;
+
+                uint32_t gap = 0;
+                if (uplinkSequenceValid) {
+                    gap = h.sequence - nextUplinkSequence;
+                    if (gap >= 0x80000000u) continue; // Duplicate or late packet.
                 }
+                if (gap > kMaxPlcFrames)
+                    opus_decoder_ctl(opusDecoder, OPUS_RESET_STATE);
+                bool decodeOk = true;
+                const uint32_t plcFrames = std::min(gap, kMaxPlcFrames);
+                for (uint32_t i = 0; i < plcFrames; ++i) {
+                    const int samples = opus_decode(opusDecoder, nullptr, 0,
+                                                    decoded.data(),
+                                                    int(sos::kOpusFrameSamples), 0);
+                    if (samples != int(sos::kOpusFrameSamples)) {
+                        decodeOk = false;
+                        break;
+                    }
+                    microphone.push(decoded);
+                }
+                const int samples = decodeOk
+                    ? opus_decode(opusDecoder, packet.data() + sos::kHeaderSize,
+                                  h.payloadBytes, decoded.data(),
+                                  int(sos::kOpusFrameSamples), 0)
+                    : OPUS_INTERNAL_ERROR;
+                if (samples != int(sos::kOpusFrameSamples)) {
+                    resetUplink();
+                    continue;
+                }
+                microphone.push(decoded);
+                nextUplinkSequence = h.sequence + 1;
+                uplinkSequenceValid = true;
+                lastValidAudio = now;
+                lastUplinkMs.store(now, std::memory_order_release);
             }
         }
 

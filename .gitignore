@@ -7,3 +7,4 @@ __pycache__/
 .vs/
 esp32s3/include/WifiConfig.h
 .trae*
+.vscode/
