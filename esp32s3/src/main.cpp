@@ -5,6 +5,7 @@
 #include <esp_arduino_version.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 #include <esp32-hal-tinyusb.h>
 #include <cmath>
 #include <opus.h>
@@ -133,7 +134,51 @@ struct Peer {
     }
 };
 
+// One FreeRTOS tick in microseconds, derived from the config instead of
+// assuming a 1 kHz tick so a tick-rate change cannot silently stretch the
+// hot loops.
+constexpr int64_t kTickUs = 1000000 / int64_t(configTICK_RATE_HZ);
+
+// Fixed-period pacing for the hot loops. Deadlines are tracked in the
+// esp_timer refclock (monotonic microseconds) rather than with relative
+// vTaskDelay calls, whose period degrades to "one tick plus loop work" and
+// accumulates drift. Each wait converts the refclock deadline to an absolute
+// tick index and sleeps via xTaskDelayUntil, so loop work can neither stretch
+// the period nor phase-shift it; being tick-anchored it also cannot undersleep
+// and start spinning. An overrun (or one of the mid-loop backoff sleeps)
+// re-anchors the schedule to now instead of bursting one catch-up pass per
+// missed deadline.
+struct Pacer {
+  TickType_t periodTicks;
+  TickType_t nextTick;
+
+  explicit Pacer(int64_t periodUs) {
+    periodTicks = usToTicks(periodUs);
+    nextTick = xTaskGetTickCount();
+  }
+
+  static TickType_t usToTicks(int64_t us) {
+    return TickType_t((us + kTickUs - 1) / kTickUs); // 向上取整
+  }
+
+  void setPeriodUs(int64_t us) {
+    periodTicks = usToTicks(us);
+  }
+
+  void wait() {
+    TickType_t now = xTaskGetTickCount();
+    if ((now - nextTick) < periodTicks) {
+      // 还没到点，阻塞到 nextTick
+      xTaskDelayUntil(&nextTick, periodTicks);
+    } else {
+      // 已经超时，直接重锚，不追赶
+      nextTick = now;
+    }
+  }
+};
+
 void audioTask(void*) {
+    Pacer pacer{1000};
     uint32_t epoch = uplinkEpoch.load();
     bool txWasActive = false, rxWasActive = false, uplinkWasFresh = false;
     // Stereo frames doubled the buffer; keeping it off the 8 KB task stack.
@@ -281,11 +326,13 @@ void audioTask(void*) {
         // Serve USB at 1 kHz only while a direction is live; an idle bridge
         // slows to 200 Hz, adding at most 5 ms to start-of-stream detection,
         // which the 300 ms network playout buffer hides.
-        vTaskDelay((txActive || rxActive) ? 1 : pdMS_TO_TICKS(5));
+        pacer.setPeriodUs((txActive || rxActive) ? 1000 : 5000);
+        pacer.wait();
     }
 }
 
 void networkTask(void*) {
+    Pacer pacer{1000};
     WiFiUDP control, audio;
     Peer sender, receiver;
     bool uplinkSequenceValid = false;
@@ -521,8 +568,8 @@ void networkTask(void*) {
         // there is nothing to parse and reconnect is timer-driven, so 20 Hz
         // is plenty; otherwise keep 5 ms discovery responsiveness without
         // spinning Core 0 against Wi-Fi/lwIP at 1 kHz.
-        vTaskDelay((sender.port != 0 || receiver.port != 0) ? 1 :
-            socketsReady ? pdMS_TO_TICKS(5) : pdMS_TO_TICKS(50));
+        pacer.setPeriodUs((sender.port != 0 || receiver.port != 0) ? 1000 : socketsReady ? 5000 : 50000);
+        pacer.wait();
     }
 }
 } // namespace
@@ -625,8 +672,8 @@ void setup() {
     // Wi-Fi modem sleep keeps the IDF default here; audioTask widens it to
     // WIFI_PS_NONE only while USB audio is streaming (see kWifiIdleSleepMs).
     WiFi.setAutoReconnect(true);
-    const auto audioResult = xTaskCreatePinnedToCore(audioTask, "sos-audio", 8192, nullptr, 4, nullptr, 1);
-    const auto netResult = xTaskCreatePinnedToCore(networkTask, "sos-network", 16384, nullptr, 2, nullptr, 0);
+    const auto audioResult = xTaskCreatePinnedToCore(audioTask, "sos-audio", 8192, nullptr, 4, nullptr, 0);
+    const auto netResult = xTaskCreatePinnedToCore(networkTask, "sos-network", 16384, nullptr, 2, nullptr, 1);
     if (audioResult != pdPASS || netResult != pdPASS) {
         statusError.store(true, std::memory_order_relaxed);
         Serial.println("Audio task creation failed; restart after checking free heap");
