@@ -7,6 +7,7 @@
 #include <esp_timer.h>
 #include <esp32-hal-tinyusb.h>
 #include <cmath>
+#include <cstring>
 #include <opus.h>
 
 // Audio Tools supplies its own class driver. Older cores use the CUSTOM slot;
@@ -24,6 +25,21 @@
 #include "AudioBuffer.h"
 #include "NonBlockingUdp.h"
 
+// ---- Output control macros -------------------------------------------------
+// Define LANMIC_ENABLE_SERIAL to enable all Serial output.
+// Undefine or comment out for silent builds (e.g. field deployments).
+// #define LANMIC_ENABLE_SERIAL
+
+#ifdef LANMIC_ENABLE_SERIAL
+  #define S_INIT()               Serial.begin(115200)
+  #define S_PRINTF(...)          Serial.printf(__VA_ARGS__)
+  #define S_FLUSH()              Serial.flush()
+#else
+  #define S_INIT()               ((void)0)
+  #define S_PRINTF(...)          ((void)0)
+  #define S_FLUSH()              ((void)0)
+#endif
+
 namespace {
 constexpr uint8_t kWifiResetPin = 0;
 constexpr uint32_t kWifiResetHoldMs = 3000;
@@ -36,6 +52,11 @@ constexpr uint32_t kWifiSnapshotIntervalMs = 1000;
 // counter means the endpoint is closed (or the cable pulled; mounted() covers
 // that instantly).
 constexpr uint32_t kUsbTxActiveTimeoutMs = 100;
+constexpr int kMaxControlPacketsPerNetLoop = 2;
+constexpr int kMaxAudioPacketsPerNetLoop = 1;
+constexpr int kMaxDownlinkFramesPerNetLoop = 1;
+constexpr uint32_t kMaxCapturedBacklogFrames = 5;
+constexpr uint32_t kMaxEncodedBacklogFrames = 8;
 constexpr uint8_t kStatusLedPin = 18;
 constexpr bool kStatusLedActiveHigh = true;
 // Opus PLC synthesizes at most 300 ms of concealment; longer gaps reset the
@@ -50,11 +71,19 @@ std::atomic<uint32_t> usbSpeakerLeftMuted{0};
 std::atomic<uint32_t> usbSpeakerRightMuted{0};
 sos::MonoPlayout microphone; // Uplink (DAW -> phone) stays mono.
 struct CapturedFrame {
-    sos::OpusFrame pcm{};
+    alignas(4) sos::OpusFrame pcm{};
     uint32_t capturedMs = 0, sequence = 0;
 };
+struct EncodedFrame {
+    std::array<uint8_t, sos::kOpusMaxBytes> payload{};
+    uint32_t capturedMs = 0, sequence = 0;
+    uint16_t payloadBytes = 0;
+};
 sos::SpscRing<CapturedFrame, 8> captured;
+// Encoder task is the only producer, networkTask is the only consumer.
+sos::SpscRing<EncodedFrame, 16> encodedDownlink;
 std::atomic<uint32_t> uplinkEpoch{0}, lastUplinkMs{0};
+std::atomic<uint32_t> downlinkEpoch{0}, downlinkReceiverActive{0};
 std::atomic<bool> wifiResetInProgress{false};
 std::atomic<bool> statusConfigPortalActive{false};
 std::atomic<bool> statusAudioStreaming{false};
@@ -84,13 +113,24 @@ struct DebugStats {
     std::atomic<uint32_t> netPacerOverrun{0}, netPacerAnchor{0};
     // 单轮循环工作耗时最大值（微秒，1 秒窗口；不含 pacer/backoff 睡眠）。
     std::atomic<uint32_t> audioLoopMaxUs{0}, netLoopMaxUs{0};
-    // captured 队列：push 失败=音频任务队满丢下行帧；pop 失败=被入队通知
-    // 唤醒时队列已空（帧已被上一轮消费的通知竞态，应恒接近 0）。
+    // networkTask 分段耗时最大值（微秒，1 秒窗口）。
+    std::atomic<uint32_t> netStateMaxUs{0}, netPollMaxUs{0};
+    std::atomic<uint32_t> netControlMaxUs{0}, netAudioRxMaxUs{0}, netDownlinkMaxUs{0};
+    std::atomic<uint32_t> netEncodeMaxUs{0}, netSendMaxUs{0};
+    // 下行队列：push 失败=原始/编码队满丢下行帧；pop 失败=被入队通知
+    // 唤醒时编码队列已空（帧已被上一轮消费的通知竞态，应恒接近 0）。
     std::atomic<uint32_t> queuePushFail{0}, queuePopFail{0};
+    std::atomic<uint32_t> rawPushFail{0}, encodedPushFail{0};
+    std::atomic<uint32_t> rawTrimFrames{0}, encodedTrimFrames{0};
     // PLC 补偿合成的帧数 / 上行 Opus 解码器复位次数（均自启动累计）。
     std::atomic<uint32_t> plcFrames{0}, uplinkResets{0};
     // UDP 发送失败次数（control 应答 + audio 下行两路，累计）。
     std::atomic<uint32_t> udpEndPacketFail{0};
+    // 最近一次 sendto hard error 的 errno（0=尚无）。
+    std::atomic<int32_t> controlSendErrno{0}, downlinkSendErrno{0};
+    // socket 重建原因细分（累计）。
+    std::atomic<uint32_t> socketPollReset{0}, controlReadReset{0}, controlSendReset{0};
+    std::atomic<uint32_t> audioReadReset{0}, downlinkSendReset{0};
     // WiFi modem sleep 状态切换次数（进/出省电各计一次，累计）。
     std::atomic<uint32_t> wifiSleepToggles{0};
     // USB TX FIFO 可写空间窗口值（字节；min=最满时，max=最空时）。
@@ -98,7 +138,7 @@ struct DebugStats {
     std::atomic<int32_t> usbTxFifoMaxFree{-1};
 };
 DebugStats stats; // 唯一统计块：热任务只写 relaxed 原子，loop 任务 1 Hz 读取。
-TaskHandle_t audioTaskHandle = nullptr, networkTaskHandle = nullptr; // 供 1 Hz 栈高水位查询
+TaskHandle_t audioTaskHandle = nullptr, encoderTaskHandle = nullptr, networkTaskHandle = nullptr; // 供 1 Hz 栈高水位查询
 
 // Publish a window max/min via CAS so a better sample landing between the
 // reporter's read and reset can never be clobbered by a stale value.
@@ -445,13 +485,15 @@ void audioTask(void*) {
                 if (frameUsed == frame.pcm.size()) {
                     frame.capturedMs = millis();
                     frame.sequence = captureSequence++;
-                    if (!captured.push(&frame, 1)) {
+                    if (!downlinkReceiverActive.load(std::memory_order_acquire)) {
+                        // 没有手机接收端时不积压原始 PCM，避免恢复后发送旧音频。
+                    } else if (!captured.push(&frame, 1)) {
                         ++stats.queuePushFail;
-                    } else if (networkTaskHandle) {
-                        // 事件驱动下行：入队即以直接任务通知唤醒
-                        // networkTask，取代旧的 1 ms 轮询探测。
-                        // （句柄可能尚未创建，audioTask 先于 networkTask 启动。）
-                        xTaskNotifyGive(networkTaskHandle);
+                        ++stats.rawPushFail;
+                    } else if (encoderTaskHandle) {
+                        // 事件驱动下行：入队即唤醒 encoderTask，编码完成后
+                        // 再唤醒 networkTask 发送，避免网络任务内做 Opus encode。
+                        xTaskNotifyGive(encoderTaskHandle);
                     }
                     frameUsed = 0;
                 }
@@ -471,26 +513,13 @@ void audioTask(void*) {
     }
 }
 
-void networkTask(void*) {
-    // Socket 轮询节拍（发现保活 + 上行接收 + 租约检查）。下行发送不依赖
-    // 该节拍：由 audioTask 的入队通知驱动（见 waitNotify）。无 socket 时
-    // 降为 50 ms（重连本身是定时器驱动）。5 ms 轮询对 20 ms 的上行帧周期
-    // 引入的抖动被上行 300 ms 目标缓冲完全吸收。
-    Pacer pacer{5000};
-    NonBlockingUdp control, audio;
-    NonBlockingUdp::Packet received;
-    Peer sender, receiver;
-    bool uplinkSequenceValid = false;
-    uint32_t nextUplinkSequence = 0;
-    uint32_t lastRetry = 0, lastValidAudio = 0;
-    uint32_t nextDownlinkAttemptMs = 0;
-    uint32_t downlinkBackoffMs = 10;
-    bool socketsReady = false;
-    bool notified = false; // 上一轮 waitNotify 是被入队通知唤醒的（供消费块区分竞态空队列）
-    CapturedFrame pendingDownlink;
-    IPAddress boundIp, currentIp;
-    std::array<uint8_t, sos::kMaxPacketSize + 1> packet{};
-    NonBlockingUdp::Ready controlReady, audioReady;
+void encoderTask(void*) {
+    // Keep the large frame buffers off the task stack; Opus encode itself
+    // still needs stack headroom for its internal scratch work.
+    static CapturedFrame input;
+    static EncodedFrame output;
+    uint32_t epoch = downlinkEpoch.load(std::memory_order_acquire);
+
     const int opusEncoderBytes = opus_encoder_get_size(sos::kOpusChannels);
     // Keep the complete encoder state in internal RAM; do not fall back to PSRAM.
     void* opusMemory = opusEncoderBytes > 0
@@ -506,19 +535,83 @@ void networkTask(void*) {
     if (opusStatus == OPUS_OK)
         opusStatus = opus_encoder_ctl(opusEncoder, OPUS_SET_VBR(0));
     if (opusStatus == OPUS_OK)
-        opusStatus = opus_encoder_ctl(opusEncoder, OPUS_SET_COMPLEXITY(4));
+        opusStatus = opus_encoder_ctl(opusEncoder, OPUS_SET_COMPLEXITY(0));
     if (opusStatus == OPUS_OK)
         opusStatus = opus_encoder_ctl(opusEncoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
     if (opusStatus != OPUS_OK) {
-        Serial.printf("Opus encoder initialization failed: %d\n", opusStatus);
+        S_PRINTF("Opus encoder initialization failed: %d\n", opusStatus);
         if (opusMemory) heap_caps_free(opusMemory);
-        vTaskDelete(nullptr);
-        return;
+        statusError.store(true, std::memory_order_relaxed);
+        for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
     }
+
+    for (;;) {
+        const uint32_t nextEpoch = downlinkEpoch.load(std::memory_order_acquire);
+        if (nextEpoch != epoch ||
+            !downlinkReceiverActive.load(std::memory_order_acquire)) {
+            epoch = nextEpoch;
+            captured.clear();
+            opus_encoder_ctl(opusEncoder, OPUS_RESET_STATE);
+        }
+
+        const uint32_t backlog = captured.size();
+        if (backlog > kMaxCapturedBacklogFrames) {
+            const uint32_t trim = backlog - kMaxCapturedBacklogFrames;
+            captured.discard(trim);
+            stats.rawTrimFrames.fetch_add(trim, std::memory_order_relaxed);
+        }
+
+        if (!captured.pop(input)) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        const int64_t encodeStartUs = esp_timer_get_time();
+        const int encoded = opus_encode(
+            opusEncoder, input.pcm.data(), int(sos::kOpusFrameSamples),
+            output.payload.data(), int(output.payload.size()));
+        statsMax(stats.netEncodeMaxUs,
+                 uint32_t(esp_timer_get_time() - encodeStartUs));
+        if (encoded <= 0) continue;
+
+        output.capturedMs = input.capturedMs;
+        output.sequence = input.sequence;
+        output.payloadBytes = uint16_t(encoded);
+        if (!encodedDownlink.push(&output, 1)) {
+            ++stats.queuePushFail;
+            ++stats.encodedPushFail;
+            if (networkTaskHandle) xTaskNotifyGive(networkTaskHandle);
+        } else if (networkTaskHandle) {
+            xTaskNotifyGive(networkTaskHandle);
+        }
+    }
+}
+
+void networkTask(void*) {
+    // Socket 轮询节拍（发现保活 + 上行接收 + 租约检查）。下行发送不依赖
+    // 该节拍：由 encoderTask 的入队通知驱动（见 waitNotify）。无 socket 时
+    // 降为 50 ms（重连本身是定时器驱动）。5 ms 轮询对 20 ms 的上行帧周期
+    // 引入的抖动被上行 300 ms 目标缓冲完全吸收。
+    Pacer pacer{5000};
+    NonBlockingUdp control, audio;
+    NonBlockingUdp::Packet received;
+    Peer sender, receiver;
+    bool uplinkSequenceValid = false;
+    uint32_t nextUplinkSequence = 0;
+    uint32_t lastRetry = 0, lastValidAudio = 0;
+    uint32_t nextDownlinkAttemptMs = 0;
+    uint32_t downlinkBackoffMs = 10;
+    bool socketsReady = false;
+    bool notified = false; // 上一轮 waitNotify 是被入队通知唤醒的（供消费块区分竞态空队列）
+    EncodedFrame pendingDownlink;
+    IPAddress boundIp, currentIp;
+    std::array<uint8_t, sos::kMaxPacketSize + 1> packet{};
+    NonBlockingUdp::Ready controlReady, audioReady;
 
     // Uplink decoder mirrors the plugin's mono 20 ms encoder profile; like the
     // encoder it stays in internal RAM.
     sos::Frame decoded{};
+    alignas(4) static int16_t decodePcm[sos::kOpusFrameSamples]{};
     const int opusDecoderBytes = opus_decoder_get_size(sos::kUplinkChannels);
     void* opusDecoderMemory = opusDecoderBytes > 0
         ? heap_caps_malloc(size_t(opusDecoderBytes), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
@@ -528,12 +621,19 @@ void networkTask(void*) {
         ? opus_decoder_init(opusDecoder, sos::kSampleRate, sos::kUplinkChannels)
         : OPUS_ALLOC_FAIL;
     if (opusDecoderStatus != OPUS_OK) {
-        Serial.printf("Opus decoder initialization failed: %d\n", opusDecoderStatus);
-        if (opusMemory) heap_caps_free(opusMemory);
+        S_PRINTF("Opus decoder initialization failed: %d\n", opusDecoderStatus);
         if (opusDecoderMemory) heap_caps_free(opusDecoderMemory);
-        vTaskDelete(nullptr);
-        return;
+        statusError.store(true, std::memory_order_relaxed);
+        for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
     }
+    auto decodeIntoFrame = [&](const uint8_t* payload, int payloadBytes) {
+        const int samples = opus_decode(opusDecoder, payload, payloadBytes,
+                                        decodePcm,
+                                        int(sos::kOpusFrameSamples), 0);
+        if (samples == int(sos::kOpusFrameSamples))
+            memcpy(decoded.data(), decodePcm, sizeof(decodePcm));
+        return samples;
+    };
     auto resetUplink = [&] {
         uplinkSequenceValid = false;
         ++stats.uplinkResets;
@@ -559,6 +659,7 @@ void networkTask(void*) {
             continue;
         }
         const uint32_t now = millis();
+        int64_t netPhaseStartUs = esp_timer_get_time();
         const bool wifiConnected =
             wifiSnapshotConnected.load(std::memory_order_acquire) != 0;
         currentIp = IPAddress(wifiSnapshotIpRaw.load(std::memory_order_acquire));
@@ -586,25 +687,39 @@ void networkTask(void*) {
                 continue;
             }
             boundIp = currentIp;
-            Serial.printf("Wi-Fi ready: %s, device %s\n", boundIp.toString().c_str(), identity);
+            S_PRINTF("Wi-Fi ready: %s, device %s\n", boundIp.toString().c_str(), identity);
         }
 
         if (sender.port && !sender.active(now)) invalidateSender();
-        if (receiver.port && !receiver.active(now)) receiver = Peer{};
+        if (receiver.port && !receiver.active(now)) {
+            receiver = Peer{};
+            downlinkReceiverActive.store(0, std::memory_order_release);
+            ++downlinkEpoch;
+            encodedDownlink.clear();
+            if (encoderTaskHandle) xTaskNotifyGive(encoderTaskHandle);
+        }
+        statsMax(stats.netStateMaxUs,
+                 uint32_t(esp_timer_get_time() - netPhaseStartUs));
 
         if (socketsReady) {
+            netPhaseStartUs = esp_timer_get_time();
             if (!NonBlockingUdp::poll(control, controlReady, audio, audioReady)) {
+                ++stats.socketPollReset;
                 control.stop(); audio.stop();
                 socketsReady = false;
                 invalidateSender();
                 receiver = Peer{};
             }
+            statsMax(stats.netPollMaxUs,
+                     uint32_t(esp_timer_get_time() - netPhaseStartUs));
         }
 
         if (socketsReady) {
-            for (int n = 0; n < 8; ++n) {
+            netPhaseStartUs = esp_timer_get_time();
+            for (int n = 0; n < kMaxControlPacketsPerNetLoop; ++n) {
                 const int got = control.read(controlReady, packet.data(), packet.size(), received);
                 if (got < 0) {
+                    ++stats.controlReadReset;
                     control.stop(); audio.stop();
                     socketsReady = false;
                     invalidateSender();
@@ -634,9 +749,10 @@ void networkTask(void*) {
                             resetUplink();
                             ++uplinkEpoch;
                         } else if (changed && h.flags == sos::Receiver) {
-                            captured.clear();
-                            ulTaskNotifyTake(pdTRUE, 0); // 换端清队列，顺带清残留通知
-                            opus_encoder_ctl(opusEncoder, OPUS_RESET_STATE);
+                            encodedDownlink.clear();
+                            downlinkReceiverActive.store(1, std::memory_order_release);
+                            ++downlinkEpoch;
+                            if (encoderTaskHandle) xTaskNotifyGive(encoderTaskHandle);
                         }
                     }
                     reply.kind = sos::Kind::Ack;
@@ -649,19 +765,22 @@ void networkTask(void*) {
                 const auto sent = control.sendTo(controlReady, ip, port, packet.data(), bytes);
                 if (sent == NonBlockingUdp::SendResult::Error) {
                     ++stats.udpEndPacketFail;
-                    control.stop(); audio.stop();
-                    socketsReady = false;
-                    invalidateSender();
-                    receiver = Peer{};
+                    ++stats.controlSendReset;
+                    stats.controlSendErrno.store(control.lastError(),
+                                                 std::memory_order_relaxed);
                     break;
                 }
             }
+            statsMax(stats.netControlMaxUs,
+                     uint32_t(esp_timer_get_time() - netPhaseStartUs));
         }
 
         if (socketsReady) {
-            for (int n = 0; n < 16; ++n) {
+            netPhaseStartUs = esp_timer_get_time();
+            for (int n = 0; n < kMaxAudioPacketsPerNetLoop; ++n) {
                 const int got = audio.read(audioReady, packet.data(), packet.size(), received);
                 if (got < 0) {
+                    ++stats.audioReadReset;
                     control.stop(); audio.stop();
                     socketsReady = false;
                     invalidateSender();
@@ -692,9 +811,7 @@ void networkTask(void*) {
                 const uint32_t plcFrames = std::min(gap, kMaxPlcFrames);
                 stats.plcFrames.fetch_add(plcFrames, std::memory_order_relaxed);
                 for (uint32_t i = 0; i < plcFrames; ++i) {
-                    const int samples = opus_decode(opusDecoder, nullptr, 0,
-                                                    decoded.data(),
-                                                    int(sos::kOpusFrameSamples), 0);
+                    const int samples = decodeIntoFrame(nullptr, 0);
                     if (samples != int(sos::kOpusFrameSamples)) {
                         decodeOk = false;
                         break;
@@ -702,9 +819,8 @@ void networkTask(void*) {
                     microphone.push(decoded);
                 }
                 const int samples = decodeOk
-                    ? opus_decode(opusDecoder, packet.data() + sos::kHeaderSize,
-                                  h.payloadBytes, decoded.data(),
-                                  int(sos::kOpusFrameSamples), 0)
+                    ? decodeIntoFrame(packet.data() + sos::kHeaderSize,
+                                      h.payloadBytes)
                     : OPUS_INTERNAL_ERROR;
                 if (samples != int(sos::kOpusFrameSamples)) {
                     resetUplink();
@@ -716,6 +832,8 @@ void networkTask(void*) {
                 lastValidAudio = now;
                 lastUplinkMs.store(now, std::memory_order_release);
             }
+            statsMax(stats.netAudioRxMaxUs,
+                     uint32_t(esp_timer_get_time() - netPhaseStartUs));
         }
 
         // Keep every produced frame and catch up at 4 ms per packet against a
@@ -724,25 +842,31 @@ void networkTask(void*) {
         // 20 ms gap into the stream for every scheduler hiccup. On real
         // congestion (sendto fails) drop the frame -- retransmitting into
         // a congested queue amplifies the loss.
-        // 下行为事件驱动：audioTask 每入队一帧即以任务通知唤醒本任务（另有
-        // 5 ms 轮询兜底）。通知只是唤醒信号而非信号量——清零式取走不保证
-        // 逐通知消费，唤醒一次就要把队列消费到排空（否则 burst 入队只发
-        // 一帧，余帧要等下次唤醒），因此发送放在 for(;;) 循环里；4 ms
-        // 追赶限速的检查在循环内且每帧刷新时间戳，只隔帧、不锁死整轮，
-        // 未到点的剩余帧由下一次唤醒（新通知或轮询到点，最迟 5 ms）继续
-        // 发送，积压按 ~5 ms/帧排空，300 ms 手机端缓冲完全吸收。
+        // 下行为事件驱动：encoderTask 每入队一帧即以任务通知唤醒本任务
+        //（另有 5 ms 轮询兜底）。通知只是唤醒信号而非信号量——清零式
+        // 取走不保证逐通知消费，唤醒后最多发送少量已编码帧，避免 sendto
+        // 把 networkTask 单轮拉长；未发完的帧由下一次唤醒（新通知或轮询
+        // 到点，最迟 5 ms）继续。
         // queuePopFail 只在「被通知唤醒却已空」时计数（帧已被上一轮消费
         // 的通知竞态）；循环内排空后的 pop 失败是正常终止，不计。
+        netPhaseStartUs = esp_timer_get_time();
         const uint32_t attemptNow = millis();
         if (!socketsReady || !receiver.active(attemptNow)) {
-            captured.clear();
+            downlinkReceiverActive.store(0, std::memory_order_release);
+            encodedDownlink.clear();
             ulTaskNotifyTake(pdTRUE, 0); // 丢帧后清掉残留通知，避免一次空唤醒
             nextDownlinkAttemptMs = attemptNow;
             downlinkBackoffMs = 10;
-        } else if (notified && captured.size() == 0) {
+        } else if (notified && encodedDownlink.size() == 0) {
             ++stats.queuePopFail;
         } else {
-            for (;;) {
+            const uint32_t encodedBacklog = encodedDownlink.size();
+            if (encodedBacklog > kMaxEncodedBacklogFrames) {
+                const uint32_t trim = encodedBacklog - kMaxEncodedBacklogFrames;
+                encodedDownlink.discard(trim);
+                stats.encodedTrimFrames.fetch_add(trim, std::memory_order_relaxed);
+            }
+            for (int n = 0; n < kMaxDownlinkFramesPerNetLoop; ++n) {
                 const uint32_t sendNow = millis();
                 if (int32_t(sendNow - nextDownlinkAttemptMs) < 0) break;
                 if (!audioReady.write) {
@@ -751,43 +875,47 @@ void networkTask(void*) {
                         std::min(downlinkBackoffMs * 2, uint32_t(100));
                     break;
                 }
-                if (!captured.pop(pendingDownlink)) break; // 队列已排空
-                const int encoded = opus_encode(
-                    opusEncoder, pendingDownlink.pcm.data(), int(sos::kOpusFrameSamples),
-                    packet.data() + sos::kHeaderSize, int(sos::kOpusMaxBytes));
-                if (encoded <= 0) {
-                    // 坏帧丢弃后停一个帧周期再继续
-                    nextDownlinkAttemptMs = sendNow + sos::kOpusFrameDurationMs;
-                    continue;
-                }
+                if (!encodedDownlink.pop(pendingDownlink)) break; // 队列已排空
                 sos::Header h{sos::Kind::AudioOpus, 0, bootSession,
                               pendingDownlink.sequence, pendingDownlink.capturedMs,
-                              uint16_t(encoded)};
+                              pendingDownlink.payloadBytes};
                 const auto bytes = sos::encode(packet.data(), h);
+                memcpy(packet.data() + sos::kHeaderSize,
+                       pendingDownlink.payload.data(),
+                       pendingDownlink.payloadBytes);
+                const int64_t downlinkStepUs = esp_timer_get_time();
                 const auto sent = audio.sendTo(audioReady, receiver.ip, receiver.port,
                                                packet.data(), bytes);
+                statsMax(stats.netSendMaxUs,
+                         uint32_t(esp_timer_get_time() - downlinkStepUs));
                 if (sent == NonBlockingUdp::SendResult::Sent) {
                     downlinkBackoffMs = 10;
                     nextDownlinkAttemptMs = sendNow + 4;
                 } else {
                     if (sent == NonBlockingUdp::SendResult::Error) {
                         ++stats.udpEndPacketFail;
-                        control.stop(); audio.stop();
-                        socketsReady = false;
-                        invalidateSender();
+                        ++stats.downlinkSendReset;
+                        stats.downlinkSendErrno.store(audio.lastError(),
+                                                      std::memory_order_relaxed);
                         receiver = Peer{};
+                        downlinkReceiverActive.store(0, std::memory_order_release);
+                        ++downlinkEpoch;
+                        encodedDownlink.clear();
+                        if (encoderTaskHandle) xTaskNotifyGive(encoderTaskHandle);
                     }
                     nextDownlinkAttemptMs = sendNow + downlinkBackoffMs;
                     downlinkBackoffMs =
                         std::min(downlinkBackoffMs * 2, uint32_t(100));
-                    if (!socketsReady) break;
+                    if (sent == NonBlockingUdp::SendResult::Error) break;
                 }
             }
         }
+        statsMax(stats.netDownlinkMaxUs,
+                 uint32_t(esp_timer_get_time() - netPhaseStartUs));
         // Socket 轮询档位：绑定 socket 后 5 ms（发现保活 + 上行接收 +
         // 租约检查；发现/订阅时延从 1 ms 放宽到 5 ms，对交互无感），
         // 无 socket 时 50 ms（重连是定时器驱动，轮询无事可做）。
-        // 下行发送不在此节拍上：入队通知会提前唤醒（waitNotify）。
+        // 下行发送不在此节拍上：encoderTask 入队通知会提前唤醒（waitNotify）。
         pacer.setPeriodUs(socketsReady ? 5000 : 50000);
         // Loop work time only (pacer/backoff sleeps excluded).
         statsMax(stats.netLoopMaxUs,
@@ -804,7 +932,7 @@ void networkTask(void*) {
 // 字段名直接嵌在每行里（name=value），无需单独表头。各字段含义/单位：
 // t_ms=毫秒；*_ovr/*_anch/*_fail/*_frames/*_rst/*_tog=自启动累计次数
 // （n_ovr 仅统计错过一个完整轮询周期、n_anch 另含通知事件重锚，与 a_* 口径不同，见 waitNotify）；
-// *_loop_max_us=微秒；usb_tx_xfer=每秒 ISO-IN 完成次数增量；usb_fifo_*=可写字节（-1=未采样）；
+// *_loop_max_us/n_*_us=微秒；usb_tx_xfer=每秒 ISO-IN 完成次数增量；usb_fifo_*=可写字节（-1=未采样）；
 // rssi_dbm=dBm（未连接 -128）；*_stack_min_b=任务栈最小剩余字节（0=任务未创建）。
 void printStatsLine() {
     static uint32_t lastUsbTxCount = 0; // 上一秒的 TX 完成计数快照
@@ -818,6 +946,42 @@ void printStatsLine() {
         stats.audioLoopMaxUs.exchange(0, std::memory_order_relaxed);
     const uint32_t netLoopUs =
         stats.netLoopMaxUs.exchange(0, std::memory_order_relaxed);
+    const uint32_t netStateUs =
+        stats.netStateMaxUs.exchange(0, std::memory_order_relaxed);
+    const uint32_t netPollUs =
+        stats.netPollMaxUs.exchange(0, std::memory_order_relaxed);
+    const uint32_t netControlUs =
+        stats.netControlMaxUs.exchange(0, std::memory_order_relaxed);
+    const uint32_t netAudioRxUs =
+        stats.netAudioRxMaxUs.exchange(0, std::memory_order_relaxed);
+    const uint32_t netDownlinkUs =
+        stats.netDownlinkMaxUs.exchange(0, std::memory_order_relaxed);
+    const uint32_t netEncodeUs =
+        stats.netEncodeMaxUs.exchange(0, std::memory_order_relaxed);
+    const uint32_t netSendUs =
+        stats.netSendMaxUs.exchange(0, std::memory_order_relaxed);
+    const uint32_t rawPushFail =
+        stats.rawPushFail.load(std::memory_order_relaxed);
+    const uint32_t encodedPushFail =
+        stats.encodedPushFail.load(std::memory_order_relaxed);
+    const uint32_t rawTrimFrames =
+        stats.rawTrimFrames.load(std::memory_order_relaxed);
+    const uint32_t encodedTrimFrames =
+        stats.encodedTrimFrames.load(std::memory_order_relaxed);
+    const uint32_t socketPollReset =
+        stats.socketPollReset.load(std::memory_order_relaxed);
+    const uint32_t controlReadReset =
+        stats.controlReadReset.load(std::memory_order_relaxed);
+    const uint32_t controlSendReset =
+        stats.controlSendReset.load(std::memory_order_relaxed);
+    const uint32_t audioReadReset =
+        stats.audioReadReset.load(std::memory_order_relaxed);
+    const uint32_t downlinkSendReset =
+        stats.downlinkSendReset.load(std::memory_order_relaxed);
+    const int32_t controlSendErrno =
+        stats.controlSendErrno.load(std::memory_order_relaxed);
+    const int32_t downlinkSendErrno =
+        stats.downlinkSendErrno.load(std::memory_order_relaxed);
     const int32_t fifoMin =
         stats.usbTxFifoMinFree.exchange(INT32_MAX, std::memory_order_relaxed);
     const int32_t fifoMax =
@@ -826,41 +990,62 @@ void printStatsLine() {
     // High-water mark in bytes on this Arduino-ESP32 core; 0 while the task never started.
     const uint32_t audioStackMin = audioTaskHandle // audioTask 栈最小剩余字节；0=任务未创建
         ? uint32_t(uxTaskGetStackHighWaterMark(audioTaskHandle)) : 0u;
+    const uint32_t encoderStackMin = encoderTaskHandle // encoderTask 栈最小剩余字节；0=任务未创建
+        ? uint32_t(uxTaskGetStackHighWaterMark(encoderTaskHandle)) : 0u;
     const uint32_t netStackMin = networkTaskHandle // networkTask 栈最小剩余字节；0=任务未创建
         ? uint32_t(uxTaskGetStackHighWaterMark(networkTaskHandle)) : 0u;
-    Serial.printf(
+    S_PRINTF(
         "t_ms=%lu,a_ovr=%u,a_anch=%u,n_ovr=%u,n_anch=%u,"
         "a_loop_max_us=%u,n_loop_max_us=%u,usb_tx_xfer=%u,"
-        "usb_fifo_min=%d,usb_fifo_max=%d,q_push_fail=%u,q_pop_fail=%u,"
+        "n_state_us=%u,n_poll_us=%u,n_ctl_us=%u,n_rx_us=%u,n_dl_us=%u,"
+        "n_enc_us=%u,n_send_us=%u,"
+        "usb_fifo_min=%d,usb_fifo_max=%d,q_push_fail=%u,q_raw_fail=%u,"
+        "q_enc_fail=%u,q_trim=%u,q_enc_trim=%u,q_pop_fail=%u,"
         "plc_frames=%u,ul_rst=%u,udp_send_fail=%u,"
-        "wifi_sleep_tog=%u,rssi_dbm=%ld,a_stack_min_b=%u,n_stack_min_b=%u\n",
+        "ctl_send_errno=%ld,dl_send_errno=%ld,"
+        "sock_poll_rst=%u,sock_ctl_read_rst=%u,sock_ctl_send_rst=%u,"
+        "sock_rx_read_rst=%u,sock_dl_send_rst=%u,"
+        "wifi_sleep_tog=%u,rssi_dbm=%ld,a_stack_min_b=%u,e_stack_min_b=%u,n_stack_min_b=%u\n",
         (unsigned long)now,
         stats.audioPacerOverrun.load(std::memory_order_relaxed),
         stats.audioPacerAnchor.load(std::memory_order_relaxed),
         stats.netPacerOverrun.load(std::memory_order_relaxed),
         stats.netPacerAnchor.load(std::memory_order_relaxed),
         audioLoopUs, netLoopUs, usbTxXferDelta,
+        netStateUs, netPollUs, netControlUs, netAudioRxUs, netDownlinkUs,
+        netEncodeUs, netSendUs,
         fifoMin == INT32_MAX ? -1 : int(fifoMin),
         int(fifoMax),
         stats.queuePushFail.load(std::memory_order_relaxed),
+        rawPushFail,
+        encodedPushFail,
+        rawTrimFrames,
+        encodedTrimFrames,
         stats.queuePopFail.load(std::memory_order_relaxed),
         stats.plcFrames.load(std::memory_order_relaxed),
         stats.uplinkResets.load(std::memory_order_relaxed),
         stats.udpEndPacketFail.load(std::memory_order_relaxed),
+        long(controlSendErrno),
+        long(downlinkSendErrno),
+        socketPollReset,
+        controlReadReset,
+        controlSendReset,
+        audioReadReset,
+        downlinkSendReset,
         stats.wifiSleepToggles.load(std::memory_order_relaxed),
-        rssi, audioStackMin, netStackMin);
+        rssi, audioStackMin, encoderStackMin, netStackMin);
 }
 } // namespace
 
 void setup() {
-    Serial.begin(115200); // UART bridge, not native USB CDC.
+    S_INIT(); // UART bridge, not native USB CDC.
     pinMode(kStatusLedPin, OUTPUT);
     setStatusLed(false);
     const auto ledResult = xTaskCreatePinnedToCore(
         statusLedTask, "status-led", 2048, nullptr, 1, nullptr, 0);
     if (ledResult != pdPASS) {
         setStatusLed(true);
-        Serial.println("Status LED task creation failed");
+        S_PRINTF("Status LED task creation failed\n");
     }
     audio_tools::AudioToolsLogger.setLogLevel(audio_tools::AudioLogger::Error);
     const uint64_t mac = ESP.getEfuseMac();
@@ -920,7 +1105,7 @@ void setup() {
     });
     if (!usb.begin(config)) {
         statusError.store(true, std::memory_order_relaxed);
-        Serial.println("USB audio initialization failed");
+        S_PRINTF("USB audio initialization failed\n");
         return;
     }
     pinMode(kWifiResetPin, INPUT_PULLUP);
@@ -939,10 +1124,10 @@ void setup() {
         wifiManager.server->send(302, "text/plain", "");
       });
     });
-    Serial.printf("Open Wi-Fi provisioning AP: %s\n", provisioningSsid);
+    S_PRINTF("Open Wi-Fi provisioning AP: %s\n", provisioningSsid);
     if (!wifiManager.autoConnect(provisioningSsid)) {
         statusError.store(true, std::memory_order_relaxed);
-        Serial.println("Wi-Fi provisioning failed to start; rebooting");
+        S_PRINTF("Wi-Fi provisioning failed to start; rebooting\n");
         delay(1000);
         ESP.restart();
     }
@@ -955,9 +1140,11 @@ void setup() {
         audioTask, "sos-audio", 8192, nullptr, 4, &audioTaskHandle, 0);
     const auto netResult = xTaskCreatePinnedToCore(
         networkTask, "sos-network", 16384, nullptr, 3, &networkTaskHandle, 1);
-    if (audioResult != pdPASS || netResult != pdPASS) {
+    const auto encoderResult = xTaskCreatePinnedToCore(
+        encoderTask, "sos-encoder", 8192, nullptr, 2, &encoderTaskHandle, 1);
+    if (audioResult != pdPASS || encoderResult != pdPASS || netResult != pdPASS) {
         statusError.store(true, std::memory_order_relaxed);
-        Serial.println("Audio task creation failed; restart after checking free heap");
+        S_PRINTF("Audio/network task creation failed; restart after checking free heap\n");
     }
 }
 
@@ -979,12 +1166,12 @@ void loop() {
             uint32_t(now - wifiResetPressedMs) >= kWifiResetHoldMs) {
             wifiResetArmed = true;
             statusResetArmed.store(true, std::memory_order_relaxed);
-            Serial.println("Wi-Fi reset armed; release BOOT to restart provisioning");
+            S_PRINTF("Wi-Fi reset armed; release BOOT to restart provisioning\n");
         }
     } else {
         wifiResetPressedMs = 0;
         if (wifiResetArmed) {
-            Serial.println("Clearing saved Wi-Fi credentials");
+            S_PRINTF("Clearing saved Wi-Fi credentials\n");
             wifiResetInProgress.store(true, std::memory_order_release);
             WiFi.setAutoReconnect(false);
             delay(100);
@@ -992,9 +1179,7 @@ void loop() {
             delay(100);
             const bool erased = WiFi.eraseAP();
             WiFi.mode(WIFI_OFF);
-            Serial.println(erased
-                ? "Saved Wi-Fi credentials cleared"
-                : "Failed to clear saved Wi-Fi credentials");
+            S_PRINTF("%s\n", erased ? "Saved Wi-Fi credentials cleared" : "Failed to clear saved Wi-Fi credentials");
             delay(250);
             ESP.restart();
         }

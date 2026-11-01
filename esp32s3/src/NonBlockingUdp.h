@@ -107,7 +107,11 @@ public:
 
     SendResult sendTo(Ready& ready, IPAddress ip, uint16_t port,
                       const uint8_t* data, size_t bytes) {
-        if (fd_ < 0) return SendResult::Error;
+        lastError_ = 0;
+        if (fd_ < 0) {
+            lastError_ = EBADF;
+            return SendResult::Error;
+        }
         if (!ready.write) return SendResult::WouldBlock;
 
         sockaddr_in to{};
@@ -118,14 +122,19 @@ public:
                                   reinterpret_cast<const sockaddr*>(&to),
                                   sizeof(to));
         if (sent == int(bytes)) return SendResult::Sent;
+        lastError_ = sent < 0 ? errno : EIO;
         ready.write = false;
-        return (sent < 0 && isWouldBlock(errno)) ? SendResult::WouldBlock
-                                                 : SendResult::Error;
+        return isWouldBlock(lastError_) ? SendResult::WouldBlock
+                                        : SendResult::Error;
+    }
+
+    int lastError() const {
+        return lastError_;
     }
 
 private:
     static bool isWouldBlock(int error) {
-        return error == EAGAIN || error == EWOULDBLOCK;
+        return error == EAGAIN || error == EWOULDBLOCK || error == ENOMEM;
     }
 
     static void addFd(int fd, fd_set& readFds, fd_set& writeFds, int& maxFd) {
@@ -141,4 +150,5 @@ private:
     }
 
     int fd_ = -1;
+    int lastError_ = 0;
 };
