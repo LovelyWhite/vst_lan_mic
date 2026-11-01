@@ -69,13 +69,19 @@ uint32_t bootSession = 0;
 // window metrics (loop-time max, FIFO min) are swapped out by the 1 Hz
 // reporter which also resets the cell for the next window.
 struct DebugStats {
-    // audioTask Pacer 的超期/重锚次数；本实现超时即重锚、不追赶，两者恒相等。
+    // audioTask Pacer 的超期/重锚次数（wait() 语义，超时即重锚、不追赶，
+    // 两者恒相等）。
     std::atomic<uint32_t> audioPacerOverrun{0}, audioPacerAnchor{0};
-    // networkTask Pacer 的超期/重锚次数，含义同上。
+    // networkTask 轮询 Pacer 的超期/重锚次数。该 Pacer 只管 socket 轮询
+    // 节拍（5 ms/50 ms），下行发送由入队通知驱动，不占它。口径注意
+    // （见 Pacer::waitNotify）：到点自然醒来不计 overrun，n_ovr 只统计
+    // 错过一个完整轮询周期（退避后返回/单轮超时），与 a_ovr 不对齐；
+    // n_anch 另含通知提前唤醒的事件重锚，故 n_anch >= n_ovr。
     std::atomic<uint32_t> netPacerOverrun{0}, netPacerAnchor{0};
     // 单轮循环工作耗时最大值（微秒，1 秒窗口；不含 pacer/backoff 睡眠）。
     std::atomic<uint32_t> audioLoopMaxUs{0}, netLoopMaxUs{0};
-    // captured 队列：push 失败=音频任务队满丢下行帧；pop 失败=网络任务空队列轮询。
+    // captured 队列：push 失败=音频任务队满丢下行帧；pop 失败=被入队通知
+    // 唤醒时队列已空（帧已被上一轮消费的通知竞态，应恒接近 0）。
     std::atomic<uint32_t> queuePushFail{0}, queuePopFail{0};
     // PLC 补偿合成的帧数 / 上行 Opus 解码器复位次数（均自启动累计）。
     std::atomic<uint32_t> plcFrames{0}, uplinkResets{0};
@@ -197,8 +203,9 @@ struct Pacer {
   TickType_t periodTicks;
   TickType_t nextTick;
   // Debug counters: a missed deadline is always re-anchored (never caught up
-  // in a burst), so both grow together by design.
-  // overrun=错过截止期次数；anchor=随之发生的重锚次数（两者恒相等）。
+  // in a burst). wait() 的两个计数恒相等；waitNotify() 的 anchor 另计
+  // 通知提前唤醒的事件重锚，故 anchor >= overrun。
+  // overrun=错过截止期次数；anchor=全部重锚次数（超期 + waitNotify 事件）。
   uint32_t overrun = 0, anchor = 0;
 
   explicit Pacer(int64_t periodUs) {
@@ -225,6 +232,45 @@ struct Pacer {
       ++anchor;
       nextTick = now;
     }
+  }
+
+  // 睡到下一个轮询截止期，但可被任务通知提前唤醒（用于 networkTask：
+  // audioTask 每入队一帧下行数据就通知一次）。返回 true=被通知提前唤醒
+  // （消费侧据此区分「竞态空队列」与正常空探测），false=睡到截止期。
+  // 注意：任务通知是唤醒信号而非信号量——清零式取走不保证逐通知消费，
+  // 消费侧必须把队列排空（见 networkTask 的下行发送循环）。
+  // 网格语义：进入时 now ∈ [nextTick, nextTick+period) 本轮有效，睡
+  // period-diff 到下一网格点；通知提前唤醒则以事件为准重锚网格（事件
+  // 驱动优先，轮询网格只是兜底）。overrun 只统计错过一个完整轮询周期
+  // （退避睡眠后返回/单轮工作超时）；anchor 另含通知重锚，故 n_anch
+  // >= n_ovr，与 audioTask 的 a_ovr 口径不同。
+  bool waitNotify() {
+    TickType_t now = xTaskGetTickCount();
+    const TickType_t diff = TickType_t(now - nextTick);
+    if (diff < periodTicks) {
+      // 等待时长必须用 period-diff 而不是 nextTick-now：本分支里
+      // now >= nextTick 恒成立，后者在 now==nextTick 时为 0——
+      // ulTaskNotifyTake(0) 立即返回，与下一轮的重锚分支形成乒乓自旋
+      // （曾以 n_ovr=21 万、core 1 烧满的形式复现）；在 now 领先 1~4
+      // tick 时则无符号回绕成 ~49 天超时，任务睡死——且队列随后压满、
+      // push 失败不再通知，再也无法唤醒。period-diff 恒在 (0, period]。
+      const TickType_t remaining = TickType_t(periodTicks - diff);
+      if (ulTaskNotifyTake(pdTRUE, remaining) != 0) {
+        // 新帧提前唤醒：事件时刻即新网格锚点（不 ++overrun——这是提前
+        // 而非超期；重锚后下一轮 diff≈0，睡满一个兜底周期）。
+        ++anchor;
+        nextTick = now;
+        return true;
+      }
+      // 睡到网格点：本轮消耗掉该时段，网格前移一个周期
+      nextTick = TickType_t(nextTick + periodTicks);
+      return false;
+    }
+    // 已超过一个完整轮询周期（中途退避睡眠或单轮工作超时）：重锚，不追赶
+    ++overrun;
+    ++anchor;
+    nextTick = now;
+    return false;
   }
 };
 
@@ -375,7 +421,14 @@ void audioTask(void*) {
                 if (frameUsed == frame.pcm.size()) {
                     frame.capturedMs = millis();
                     frame.sequence = captureSequence++;
-                    if (!captured.push(&frame, 1)) ++stats.queuePushFail;
+                    if (!captured.push(&frame, 1)) {
+                        ++stats.queuePushFail;
+                    } else if (networkTaskHandle) {
+                        // 事件驱动下行：入队即以直接任务通知唤醒
+                        // networkTask，取代旧的 1 ms 轮询探测。
+                        // （句柄可能尚未创建，audioTask 先于 networkTask 启动。）
+                        xTaskNotifyGive(networkTaskHandle);
+                    }
                     frameUsed = 0;
                 }
             }
@@ -395,7 +448,11 @@ void audioTask(void*) {
 }
 
 void networkTask(void*) {
-    Pacer pacer{1000};
+    // Socket 轮询节拍（发现保活 + 上行接收 + 租约检查）。下行发送不依赖
+    // 该节拍：由 audioTask 的入队通知驱动（见 waitNotify）。无 socket 时
+    // 降为 50 ms（重连本身是定时器驱动）。5 ms 轮询对 20 ms 的上行帧周期
+    // 引入的抖动被上行 300 ms 目标缓冲完全吸收。
+    Pacer pacer{5000};
     WiFiUDP control, audio;
     Peer sender, receiver;
     bool uplinkSequenceValid = false;
@@ -404,6 +461,7 @@ void networkTask(void*) {
     uint32_t nextDownlinkAttemptMs = 0;
     uint32_t downlinkBackoffMs = 10;
     bool socketsReady = false;
+    bool notified = false; // 上一轮 waitNotify 是被入队通知唤醒的（供消费块区分竞态空队列）
     CapturedFrame pendingDownlink;
     IPAddress boundIp;
     std::array<uint8_t, sos::kMaxPacketSize + 1> packet{};
@@ -533,6 +591,7 @@ void networkTask(void*) {
                             ++uplinkEpoch;
                         } else if (changed && h.flags == sos::Receiver) {
                             captured.clear();
+                            ulTaskNotifyTake(pdTRUE, 0); // 换端清队列，顺带清残留通知
                             opus_encoder_ctl(opusEncoder, OPUS_RESET_STATE);
                         }
                     }
@@ -606,49 +665,63 @@ void networkTask(void*) {
         // 20 ms gap into the stream for every scheduler hiccup. On real
         // congestion (endPacket fails) drop the frame -- retransmitting into
         // a congested queue amplifies the loss.
+        // 下行为事件驱动：audioTask 每入队一帧即以任务通知唤醒本任务（另有
+        // 5 ms 轮询兜底）。通知只是唤醒信号而非信号量——清零式取走不保证
+        // 逐通知消费，唤醒一次就要把队列消费到排空（否则 burst 入队只发
+        // 一帧，余帧要等下次唤醒），因此发送放在 for(;;) 循环里；4 ms
+        // 追赶限速的检查在循环内且每帧刷新时间戳，只隔帧、不锁死整轮，
+        // 未到点的剩余帧由下一次唤醒（新通知或轮询到点，最迟 5 ms）继续
+        // 发送，积压按 ~5 ms/帧排空，300 ms 手机端缓冲完全吸收。
+        // queuePopFail 只在「被通知唤醒却已空」时计数（帧已被上一轮消费
+        // 的通知竞态）；循环内排空后的 pop 失败是正常终止，不计。
         const uint32_t attemptNow = millis();
         if (!socketsReady || !receiver.active(attemptNow)) {
             captured.clear();
+            ulTaskNotifyTake(pdTRUE, 0); // 丢帧后清掉残留通知，避免一次空唤醒
             nextDownlinkAttemptMs = attemptNow;
             downlinkBackoffMs = 10;
-        } else if (int32_t(attemptNow - nextDownlinkAttemptMs) >= 0) {
-            if (captured.pop(pendingDownlink)) {
+        } else if (notified && captured.size() == 0) {
+            ++stats.queuePopFail;
+        } else {
+            for (;;) {
+                const uint32_t sendNow = millis();
+                if (int32_t(sendNow - nextDownlinkAttemptMs) < 0) break;
+                if (!captured.pop(pendingDownlink)) break; // 队列已排空
                 const int encoded = opus_encode(
                     opusEncoder, pendingDownlink.pcm.data(), int(sos::kOpusFrameSamples),
                     packet.data() + sos::kHeaderSize, int(sos::kOpusMaxBytes));
                 if (encoded <= 0) {
-                    nextDownlinkAttemptMs = attemptNow + sos::kOpusFrameDurationMs;
-                } else {
-                    sos::Header h{sos::Kind::AudioOpus, 0, bootSession,
-                                  pendingDownlink.sequence, pendingDownlink.capturedMs,
-                                  uint16_t(encoded)};
-                    const auto bytes = sos::encode(packet.data(), h);
-                    const bool begun = audio.beginPacket(receiver.ip, receiver.port);
-                    if (begun) audio.write(packet.data(), bytes);
-                    if (begun && audio.endPacket()) {
-                        downlinkBackoffMs = 10;
-                        nextDownlinkAttemptMs = attemptNow + 4;
-                    } else {
-                        // begun == true here means endPacket itself failed.
-                        if (begun) ++stats.udpEndPacketFail;
-                        nextDownlinkAttemptMs = attemptNow + downlinkBackoffMs;
-                        downlinkBackoffMs =
-                            std::min(downlinkBackoffMs * 2, uint32_t(100));
-                    }
+                    // 坏帧丢弃后停一个帧周期再继续
+                    nextDownlinkAttemptMs = sendNow + sos::kOpusFrameDurationMs;
+                    continue;
                 }
-            } else {
-                ++stats.queuePopFail;
+                sos::Header h{sos::Kind::AudioOpus, 0, bootSession,
+                              pendingDownlink.sequence, pendingDownlink.capturedMs,
+                              uint16_t(encoded)};
+                const auto bytes = sos::encode(packet.data(), h);
+                const bool begun = audio.beginPacket(receiver.ip, receiver.port);
+                if (begun) audio.write(packet.data(), bytes);
+                if (begun && audio.endPacket()) {
+                    downlinkBackoffMs = 10;
+                    nextDownlinkAttemptMs = sendNow + 4;
+                } else {
+                    // begun == true here means endPacket itself failed.
+                    if (begun) ++stats.udpEndPacketFail;
+                    nextDownlinkAttemptMs = sendNow + downlinkBackoffMs;
+                    downlinkBackoffMs =
+                        std::min(downlinkBackoffMs * 2, uint32_t(100));
+                }
             }
         }
-        // With a subscriber the socket poll stays at 1 kHz. With no sockets
-        // there is nothing to parse and reconnect is timer-driven, so 20 Hz
-        // is plenty; otherwise keep 5 ms discovery responsiveness without
-        // spinning Core 0 against Wi-Fi/lwIP at 1 kHz.
-        pacer.setPeriodUs((sender.port != 0 || receiver.port != 0) ? 1000 : socketsReady ? 5000 : 50000);
+        // Socket 轮询档位：绑定 socket 后 5 ms（发现保活 + 上行接收 +
+        // 租约检查；发现/订阅时延从 1 ms 放宽到 5 ms，对交互无感），
+        // 无 socket 时 50 ms（重连是定时器驱动，轮询无事可做）。
+        // 下行发送不在此节拍上：入队通知会提前唤醒（waitNotify）。
+        pacer.setPeriodUs(socketsReady ? 5000 : 50000);
         // Loop work time only (pacer/backoff sleeps excluded).
         statsMax(stats.netLoopMaxUs,
                  uint32_t(esp_timer_get_time() - netLoopStartUs));
-        pacer.wait();
+        notified = pacer.waitNotify();
         stats.netPacerOverrun.store(pacer.overrun, std::memory_order_relaxed);
         stats.netPacerAnchor.store(pacer.anchor, std::memory_order_relaxed);
     }
@@ -658,7 +731,8 @@ void networkTask(void*) {
 // 因此一行的 UART 发送时间（~15 ms）和 Wi-Fi/RSSI 查询永远不会抢占音频或网络
 // 调度。这是唯一的统计输出；没有任何逐帧打印。
 // 字段名直接嵌在每行里（name=value），无需单独表头。各字段含义/单位：
-// t_ms=毫秒；*_ovr/*_anch/*_fail/*_frames/*_rst/*_tog=自启动累计次数；
+// t_ms=毫秒；*_ovr/*_anch/*_fail/*_frames/*_rst/*_tog=自启动累计次数
+// （n_ovr 仅统计错过一个完整轮询周期、n_anch 另含通知事件重锚，与 a_* 口径不同，见 waitNotify）；
 // *_loop_max_us=微秒；usb_tx_xfer=每秒 ISO-IN 完成次数增量；usb_fifo_min=字节（-1=未采样）；
 // rssi_dbm=dBm（未连接 -128）；*_stack_min_b=任务栈最小剩余字节（0=任务未创建）。
 void printStatsLine() {
@@ -806,7 +880,7 @@ void setup() {
     const auto audioResult = xTaskCreatePinnedToCore(
         audioTask, "sos-audio", 8192, nullptr, 4, &audioTaskHandle, 0);
     const auto netResult = xTaskCreatePinnedToCore(
-        networkTask, "sos-network", 16384, nullptr, 2, &networkTaskHandle, 1);
+        networkTask, "sos-network", 16384, nullptr, 3, &networkTaskHandle, 1);
     if (audioResult != pdPASS || netResult != pdPASS) {
         statusError.store(true, std::memory_order_relaxed);
         Serial.println("Audio task creation failed; restart after checking free heap");
@@ -846,7 +920,7 @@ void loop() {
         }
     }
 
-    // One aggregated CSV stats line per second (header printed in setup()).
+    // One aggregated name=value stats line per second (see printStatsLine).
     static uint32_t lastStatsMs = 0;
     if (uint32_t(now - lastStatsMs) >= 1000) {
         lastStatsMs = now;
