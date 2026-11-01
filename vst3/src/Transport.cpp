@@ -19,6 +19,10 @@ juce::String normalizedDeviceIdentity(const juce::String& value) {
     return juce::String(sos::kDeviceName) + "-" + number;
 }
 constexpr uint32_t kMaxPlcFrames = 300 / sos::kOpusFrameDurationMs;
+constexpr uint32_t kMaxOutgoingAgeMs = 300;
+constexpr uint32_t kMaxOutgoingBacklogFrames = 32;
+constexpr uint32_t kSendCatchupIntervalMs = 6;
+constexpr int kMaxSendFramesPerLoop = 1;
 }
 
 Transport::Transport(bool sending)
@@ -101,7 +105,7 @@ void Transport::run() {
         if (codecStatus == OPUS_OK)
             codecStatus = opus_encoder_ctl(encoder, OPUS_SET_VBR(0));
         if (codecStatus == OPUS_OK)
-            codecStatus = opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(10));
+            codecStatus = opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(5));
         if (codecStatus == OPUS_OK)
             codecStatus = opus_encoder_ctl(encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
     }
@@ -155,6 +159,7 @@ void Transport::run() {
         uint32_t peerBoot = 0, selectedAt = 0, lastAck = 0, lastAudio = 0;
         uint32_t lastDiscover = nowMs() - 1000, lastSubscribe = nowMs() - 1000;
         uint32_t lastInterfaceRefresh = nowMs();
+        uint32_t nextUplinkSendMs = 0;
         bool wasEnabled = false, haveAck = false, haveAudio = false;
         bool sequenceValid = false;
         uint32_t nextSequence = 0;
@@ -172,6 +177,7 @@ void Transport::run() {
             peerIp.clear();
             peerBoot = 0;
             haveAck = haveAudio = false;
+            nextUplinkSendMs = 0;
             state_ = State::Searching;
             resetStreamState();
             invalidateAudio();
@@ -241,6 +247,7 @@ void Transport::run() {
                 state_ = peerIp.isEmpty() ? State::Searching : State::Connecting;
                 selectedAt = now;
                 lastSubscribe = now - 1000;
+                nextUplinkSendMs = 0;
                 wasEnabled = enabled;
             }
             if (peerIp.isNotEmpty() && enabled &&
@@ -379,28 +386,41 @@ void Transport::run() {
                 // disconnected, disabled) or in enqueue (queue full) never
                 // burns a number, so sender-side trimming can never masquerade
                 // as packet loss and the receiver only ever sees gaps from the
-                // network itself. The budget clears several cycles of backlog
-                // in one pass, but stays at 16 packets so a burst never
-                // outruns the ESP32-side drain rate (16 packets per poll) and
-                // overflows its socket buffers into real packet loss.
+                // network itself. The network thread keeps the larger queue
+                // bounded by dropping old backlog, then sends at a controlled
+                // catch-up pace so the ESP32 socket drain is not hit by bursts.
                 const uint32_t sendNow = nowMs();
-                Outgoing frame;
-                for (int budget = 16; budget > 0 && outgoing_.pop(frame); --budget) {
-                    if (!enabled || !connected() ||
-                        uint32_t(sendNow - frame.timeMs) > 300)
-                        continue;
-                    const int encoded = opus_encode(
-                        encoder, frame.pcm.data(), int(sos::kOpusFrameSamples),
-                        packet.data() + sos::kHeaderSize, int(sos::kOpusMaxBytes));
-                    if (encoded <= 0) {
-                        resetStreamState();
-                        continue;
+                if (!enabled || !connected()) {
+                    outgoing_.clear();
+                    nextUplinkSendMs = sendNow;
+                } else {
+                    const auto backlog = outgoing_.size();
+                    if (backlog > kMaxOutgoingBacklogFrames)
+                        outgoing_.discard(backlog - kMaxOutgoingBacklogFrames);
+
+                    if (int32_t(sendNow - nextUplinkSendMs) >= 0 &&
+                        socket.waitUntilReady(false, 0) == 1) {
+                        Outgoing frame;
+                        for (int budget = kMaxSendFramesPerLoop;
+                             budget > 0 && outgoing_.pop(frame);
+                             --budget) {
+                            if (uint32_t(sendNow - frame.timeMs) > kMaxOutgoingAgeMs)
+                                continue;
+                            const int encoded = opus_encode(
+                                encoder, frame.pcm.data(), int(sos::kOpusFrameSamples),
+                                packet.data() + sos::kHeaderSize, int(sos::kOpusMaxBytes));
+                            if (encoded <= 0) {
+                                resetStreamState();
+                                continue;
+                            }
+                            sos::Header h{sos::Kind::AudioOpus, 0, session_,
+                                          sendSequence_++, frame.timeMs,
+                                          uint16_t(encoded)};
+                            const auto bytes = int(sos::encode(packet.data(), h));
+                            socket.write(peerIp, sos::kUplinkPort, packet.data(), bytes);
+                            nextUplinkSendMs = sendNow + kSendCatchupIntervalMs;
+                        }
                     }
-                    sos::Header h{sos::Kind::AudioOpus, 0, session_, sendSequence_++,
-                                  frame.timeMs, uint16_t(encoded)};
-                    const auto bytes = int(sos::encode(packet.data(), h));
-                    if (socket.waitUntilReady(false, 0) == 1)
-                        socket.write(peerIp, sos::kUplinkPort, packet.data(), bytes);
                 }
             }
         }
