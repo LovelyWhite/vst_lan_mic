@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
-#include <WiFiUdp.h>
 #include <esp_arduino_version.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
@@ -23,6 +22,7 @@
 #undef USB_INTERFACE_AUDIO
 #endif
 #include "AudioBuffer.h"
+#include "NonBlockingUdp.h"
 
 namespace {
 constexpr uint8_t kWifiResetPin = 0;
@@ -30,6 +30,7 @@ constexpr uint32_t kWifiResetHoldMs = 3000;
 // How long the USB bridge must stay quiet before Wi-Fi modem sleep is
 // re-enabled; holding the radio awake costs real current while idle.
 constexpr uint32_t kWifiIdleSleepMs = 5000;
+constexpr uint32_t kWifiSnapshotIntervalMs = 1000;
 // ISO-IN transfers complete once per millisecond while the host keeps the
 // streaming alt setting open, so a 100 ms silence in the ISR-side completion
 // counter means the endpoint is closed (or the cable pulled; mounted() covers
@@ -59,6 +60,9 @@ std::atomic<bool> statusConfigPortalActive{false};
 std::atomic<bool> statusAudioStreaming{false};
 std::atomic<bool> statusResetArmed{false};
 std::atomic<bool> statusError{false};
+std::atomic<uint32_t> wifiSnapshotConnected{0};
+std::atomic<uint32_t> wifiSnapshotIpRaw{0};
+std::atomic<int32_t> wifiSnapshotRssi{-128};
 char identity[64]{}, usbSerial[24]{};
 uint32_t bootSession = 0;
 
@@ -66,7 +70,7 @@ uint32_t bootSession = 0;
 // loop() on the Arduino task. Hot tasks only touch lock-free relaxed
 // atomics here -- no locks, no delays, no per-frame prints, so scheduling
 // and the ISR paths stay untouched. Event counters accumulate since boot;
-// window metrics (loop-time max, FIFO min) are swapped out by the 1 Hz
+// window metrics (loop-time/FIFO max/min) are swapped out by the 1 Hz
 // reporter which also resets the cell for the next window.
 struct DebugStats {
     // audioTask Pacer 的超期/重锚次数（wait() 语义，超时即重锚、不追赶，
@@ -85,12 +89,13 @@ struct DebugStats {
     std::atomic<uint32_t> queuePushFail{0}, queuePopFail{0};
     // PLC 补偿合成的帧数 / 上行 Opus 解码器复位次数（均自启动累计）。
     std::atomic<uint32_t> plcFrames{0}, uplinkResets{0};
-    // UDP endPacket 发送失败次数（control 应答 + audio 下行两路，累计）。
+    // UDP 发送失败次数（control 应答 + audio 下行两路，累计）。
     std::atomic<uint32_t> udpEndPacketFail{0};
     // WiFi modem sleep 状态切换次数（进/出省电各计一次，累计）。
     std::atomic<uint32_t> wifiSleepToggles{0};
-    // USB TX FIFO 最小剩余字节数（1 秒窗口内采样；INT32_MAX=本窗口未采样，即未推流）。
+    // USB TX FIFO 可写空间窗口值（字节；min=最满时，max=最空时）。
     std::atomic<int32_t> usbTxFifoMinFree{INT32_MAX};
+    std::atomic<int32_t> usbTxFifoMaxFree{-1};
 };
 DebugStats stats; // 唯一统计块：热任务只写 relaxed 原子，loop 任务 1 Hz 读取。
 TaskHandle_t audioTaskHandle = nullptr, networkTaskHandle = nullptr; // 供 1 Hz 栈高水位查询
@@ -99,6 +104,14 @@ TaskHandle_t audioTaskHandle = nullptr, networkTaskHandle = nullptr; // 供 1 Hz
 // reporter's read and reset can never be clobbered by a stale value.
 void statsMax(std::atomic<uint32_t>& cell, uint32_t value) {
     uint32_t current = cell.load(std::memory_order_relaxed);
+    while (value > current &&
+           !cell.compare_exchange_weak(current, value,
+                                       std::memory_order_relaxed,
+                                       std::memory_order_relaxed)) {}
+}
+
+void statsMax(std::atomic<int32_t>& cell, int32_t value) {
+    int32_t current = cell.load(std::memory_order_relaxed);
     while (value > current &&
            !cell.compare_exchange_weak(current, value,
                                        std::memory_order_relaxed,
@@ -117,6 +130,15 @@ void setStatusLed(bool on) {
     digitalWrite(kStatusLedPin, on == kStatusLedActiveHigh ? HIGH : LOW);
 }
 
+void refreshWifiSnapshot() {
+    const bool connected = WiFi.status() == WL_CONNECTED;
+    wifiSnapshotConnected.store(connected ? 1u : 0u, std::memory_order_release);
+    wifiSnapshotIpRaw.store(connected ? uint32_t(WiFi.localIP()) : 0u,
+                            std::memory_order_release);
+    wifiSnapshotRssi.store(connected ? int32_t(WiFi.RSSI()) : -128,
+                           std::memory_order_release);
+}
+
 void statusLedTask(void*) {
     for (;;) {
         const uint32_t now = millis();
@@ -132,7 +154,7 @@ void statusLedTask(void*) {
         } else if (statusConfigPortalActive.load(std::memory_order_relaxed)) {
             on = ((now / 500) & 1u) == 0;
             pollMs = 125;
-        } else if (WiFi.status() != WL_CONNECTED) {
+        } else if (!wifiSnapshotConnected.load(std::memory_order_acquire)) {
             on = ((now / 125) & 1u) == 0;
             pollMs = 31;
         } else if (statusAudioStreaming.load(std::memory_order_relaxed)) {
@@ -366,9 +388,11 @@ void audioTask(void*) {
         // ISR-side xfer callback only drains, so the free-space observation
         // cannot go stale towards "less room").
         if (txActive) {
-            // Sample the steady FIFO level each pass; the window minimum is
-            // the stall budget that shows up as clicks when it nears zero.
-            statsMin(stats.usbTxFifoMinFree, int32_t(usb.availableForWrite()));
+            // Track writable space: min shows how full the FIFO stayed, max
+            // shows whether it ever approached empty during this window.
+            const int32_t txFree = int32_t(usb.availableForWrite());
+            statsMin(stats.usbTxFifoMinFree, txFree);
+            statsMax(stats.usbTxFifoMaxFree, txFree);
             microphone.prepare();
             for (int batch = 0; batch < 8 &&
                  usb.availableForWrite() >= int(sizeof(micSamples)); ++batch) {
@@ -453,7 +477,8 @@ void networkTask(void*) {
     // 降为 50 ms（重连本身是定时器驱动）。5 ms 轮询对 20 ms 的上行帧周期
     // 引入的抖动被上行 300 ms 目标缓冲完全吸收。
     Pacer pacer{5000};
-    WiFiUDP control, audio;
+    NonBlockingUdp control, audio;
+    NonBlockingUdp::Packet received;
     Peer sender, receiver;
     bool uplinkSequenceValid = false;
     uint32_t nextUplinkSequence = 0;
@@ -463,8 +488,9 @@ void networkTask(void*) {
     bool socketsReady = false;
     bool notified = false; // 上一轮 waitNotify 是被入队通知唤醒的（供消费块区分竞态空队列）
     CapturedFrame pendingDownlink;
-    IPAddress boundIp;
+    IPAddress boundIp, currentIp;
     std::array<uint8_t, sos::kMaxPacketSize + 1> packet{};
+    NonBlockingUdp::Ready controlReady, audioReady;
     const int opusEncoderBytes = opus_encoder_get_size(sos::kOpusChannels);
     // Keep the complete encoder state in internal RAM; do not fall back to PSRAM.
     void* opusMemory = opusEncoderBytes > 0
@@ -533,8 +559,10 @@ void networkTask(void*) {
             continue;
         }
         const uint32_t now = millis();
-        if (WiFi.status() != WL_CONNECTED ||
-            (socketsReady && boundIp != WiFi.localIP())) {
+        const bool wifiConnected =
+            wifiSnapshotConnected.load(std::memory_order_acquire) != 0;
+        currentIp = IPAddress(wifiSnapshotIpRaw.load(std::memory_order_acquire));
+        if (!wifiConnected || (socketsReady && boundIp != currentIp)) {
             if (socketsReady) {
                 control.stop(); audio.stop();
                 socketsReady = false;
@@ -547,9 +575,9 @@ void networkTask(void*) {
             }
         } else if (!socketsReady) {
             control.stop(); audio.stop();
-            const bool controlReady = control.begin(sos::kDiscoveryPort);
-            const bool audioReady = audio.begin(sos::kUplinkPort);
-            socketsReady = controlReady && audioReady;
+            const bool controlBound = control.begin(sos::kDiscoveryPort);
+            const bool audioBound = audio.begin(sos::kUplinkPort);
+            socketsReady = controlBound && audioBound;
             if (!socketsReady) {
                 control.stop(); audio.stop();
                 statsMax(stats.netLoopMaxUs,
@@ -557,7 +585,7 @@ void networkTask(void*) {
                 vTaskDelay(pdMS_TO_TICKS(100));
                 continue;
             }
-            boundIp = WiFi.localIP();
+            boundIp = currentIp;
             Serial.printf("Wi-Fi ready: %s, device %s\n", boundIp.toString().c_str(), identity);
         }
 
@@ -565,12 +593,28 @@ void networkTask(void*) {
         if (receiver.port && !receiver.active(now)) receiver = Peer{};
 
         if (socketsReady) {
+            if (!NonBlockingUdp::poll(control, controlReady, audio, audioReady)) {
+                control.stop(); audio.stop();
+                socketsReady = false;
+                invalidateSender();
+                receiver = Peer{};
+            }
+        }
+
+        if (socketsReady) {
             for (int n = 0; n < 8; ++n) {
-                const int length = control.parsePacket();
-                if (!length) break;
-                const IPAddress ip = control.remoteIP();
-                const uint16_t port = control.remotePort();
-                const int got = control.read(packet.data(), packet.size());
+                const int got = control.read(controlReady, packet.data(), packet.size(), received);
+                if (got < 0) {
+                    control.stop(); audio.stop();
+                    socketsReady = false;
+                    invalidateSender();
+                    receiver = Peer{};
+                    break;
+                }
+                if (!got) break;
+                const int length = received.length;
+                const IPAddress ip = received.ip;
+                const uint16_t port = received.port;
                 sos::Header h;
                 if (got != length || !sos::decode(packet.data(), size_t(got), h)) continue;
                 sos::Header reply;
@@ -602,17 +646,32 @@ void networkTask(void*) {
                     continue;
                 }
                 const auto bytes = sos::encode(packet.data(), reply);
-                if (control.beginPacket(ip, port)) {
-                    control.write(packet.data(), bytes);
-                    if (!control.endPacket()) ++stats.udpEndPacketFail;
+                const auto sent = control.sendTo(controlReady, ip, port, packet.data(), bytes);
+                if (sent == NonBlockingUdp::SendResult::Error) {
+                    ++stats.udpEndPacketFail;
+                    control.stop(); audio.stop();
+                    socketsReady = false;
+                    invalidateSender();
+                    receiver = Peer{};
+                    break;
                 }
             }
+        }
+
+        if (socketsReady) {
             for (int n = 0; n < 16; ++n) {
-                const int length = audio.parsePacket();
-                if (!length) break;
-                const IPAddress ip = audio.remoteIP();
-                const uint16_t port = audio.remotePort();
-                const int got = audio.read(packet.data(), packet.size());
+                const int got = audio.read(audioReady, packet.data(), packet.size(), received);
+                if (got < 0) {
+                    control.stop(); audio.stop();
+                    socketsReady = false;
+                    invalidateSender();
+                    receiver = Peer{};
+                    break;
+                }
+                if (!got) break;
+                const int length = received.length;
+                const IPAddress ip = received.ip;
+                const uint16_t port = received.port;
                 sos::Header h;
                 if (got != length || !sos::decode(packet.data(), size_t(got), h) ||
                     h.kind != sos::Kind::AudioOpus || !sender.active(now) ||
@@ -663,7 +722,7 @@ void networkTask(void*) {
         // 20 ms production period: the phone playout buffer absorbs the burst
         // with no audible hole, while dropping to the newest frame punched a
         // 20 ms gap into the stream for every scheduler hiccup. On real
-        // congestion (endPacket fails) drop the frame -- retransmitting into
+        // congestion (sendto fails) drop the frame -- retransmitting into
         // a congested queue amplifies the loss.
         // 下行为事件驱动：audioTask 每入队一帧即以任务通知唤醒本任务（另有
         // 5 ms 轮询兜底）。通知只是唤醒信号而非信号量——清零式取走不保证
@@ -686,6 +745,12 @@ void networkTask(void*) {
             for (;;) {
                 const uint32_t sendNow = millis();
                 if (int32_t(sendNow - nextDownlinkAttemptMs) < 0) break;
+                if (!audioReady.write) {
+                    nextDownlinkAttemptMs = sendNow + downlinkBackoffMs;
+                    downlinkBackoffMs =
+                        std::min(downlinkBackoffMs * 2, uint32_t(100));
+                    break;
+                }
                 if (!captured.pop(pendingDownlink)) break; // 队列已排空
                 const int encoded = opus_encode(
                     opusEncoder, pendingDownlink.pcm.data(), int(sos::kOpusFrameSamples),
@@ -699,17 +764,23 @@ void networkTask(void*) {
                               pendingDownlink.sequence, pendingDownlink.capturedMs,
                               uint16_t(encoded)};
                 const auto bytes = sos::encode(packet.data(), h);
-                const bool begun = audio.beginPacket(receiver.ip, receiver.port);
-                if (begun) audio.write(packet.data(), bytes);
-                if (begun && audio.endPacket()) {
+                const auto sent = audio.sendTo(audioReady, receiver.ip, receiver.port,
+                                               packet.data(), bytes);
+                if (sent == NonBlockingUdp::SendResult::Sent) {
                     downlinkBackoffMs = 10;
                     nextDownlinkAttemptMs = sendNow + 4;
                 } else {
-                    // begun == true here means endPacket itself failed.
-                    if (begun) ++stats.udpEndPacketFail;
+                    if (sent == NonBlockingUdp::SendResult::Error) {
+                        ++stats.udpEndPacketFail;
+                        control.stop(); audio.stop();
+                        socketsReady = false;
+                        invalidateSender();
+                        receiver = Peer{};
+                    }
                     nextDownlinkAttemptMs = sendNow + downlinkBackoffMs;
                     downlinkBackoffMs =
                         std::min(downlinkBackoffMs * 2, uint32_t(100));
+                    if (!socketsReady) break;
                 }
             }
         }
@@ -733,7 +804,7 @@ void networkTask(void*) {
 // 字段名直接嵌在每行里（name=value），无需单独表头。各字段含义/单位：
 // t_ms=毫秒；*_ovr/*_anch/*_fail/*_frames/*_rst/*_tog=自启动累计次数
 // （n_ovr 仅统计错过一个完整轮询周期、n_anch 另含通知事件重锚，与 a_* 口径不同，见 waitNotify）；
-// *_loop_max_us=微秒；usb_tx_xfer=每秒 ISO-IN 完成次数增量；usb_fifo_min=字节（-1=未采样）；
+// *_loop_max_us=微秒；usb_tx_xfer=每秒 ISO-IN 完成次数增量；usb_fifo_*=可写字节（-1=未采样）；
 // rssi_dbm=dBm（未连接 -128）；*_stack_min_b=任务栈最小剩余字节（0=任务未创建）。
 void printStatsLine() {
     static uint32_t lastUsbTxCount = 0; // 上一秒的 TX 完成计数快照
@@ -749,17 +820,18 @@ void printStatsLine() {
         stats.netLoopMaxUs.exchange(0, std::memory_order_relaxed);
     const int32_t fifoMin =
         stats.usbTxFifoMinFree.exchange(INT32_MAX, std::memory_order_relaxed);
-    const long rssi = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : -128; // dBm，未连接打印 -128
-    // High-water mark in bytes (StackType_t is 32-bit on ESP32); 0 while the
-    // task never started.
+    const int32_t fifoMax =
+        stats.usbTxFifoMaxFree.exchange(-1, std::memory_order_relaxed);
+    const long rssi = wifiSnapshotRssi.load(std::memory_order_acquire); // dBm，未连接打印 -128
+    // High-water mark in bytes on this Arduino-ESP32 core; 0 while the task never started.
     const uint32_t audioStackMin = audioTaskHandle // audioTask 栈最小剩余字节；0=任务未创建
-        ? uint32_t(uxTaskGetStackHighWaterMark(audioTaskHandle)) * 4u : 0u;
+        ? uint32_t(uxTaskGetStackHighWaterMark(audioTaskHandle)) : 0u;
     const uint32_t netStackMin = networkTaskHandle // networkTask 栈最小剩余字节；0=任务未创建
-        ? uint32_t(uxTaskGetStackHighWaterMark(networkTaskHandle)) * 4u : 0u;
+        ? uint32_t(uxTaskGetStackHighWaterMark(networkTaskHandle)) : 0u;
     Serial.printf(
         "t_ms=%lu,a_ovr=%u,a_anch=%u,n_ovr=%u,n_anch=%u,"
         "a_loop_max_us=%u,n_loop_max_us=%u,usb_tx_xfer=%u,"
-        "usb_fifo_min=%d,q_push_fail=%u,q_pop_fail=%u,"
+        "usb_fifo_min=%d,usb_fifo_max=%d,q_push_fail=%u,q_pop_fail=%u,"
         "plc_frames=%u,ul_rst=%u,udp_send_fail=%u,"
         "wifi_sleep_tog=%u,rssi_dbm=%ld,a_stack_min_b=%u,n_stack_min_b=%u\n",
         (unsigned long)now,
@@ -769,6 +841,7 @@ void printStatsLine() {
         stats.netPacerAnchor.load(std::memory_order_relaxed),
         audioLoopUs, netLoopUs, usbTxXferDelta,
         fifoMin == INT32_MAX ? -1 : int(fifoMin),
+        int(fifoMax),
         stats.queuePushFail.load(std::memory_order_relaxed),
         stats.queuePopFail.load(std::memory_order_relaxed),
         stats.plcFrames.load(std::memory_order_relaxed),
@@ -874,6 +947,7 @@ void setup() {
         ESP.restart();
     }
     statusConfigPortalActive.store(false, std::memory_order_relaxed);
+    refreshWifiSnapshot();
     // Wi-Fi modem sleep keeps the IDF default here; audioTask widens it to
     // WIFI_PS_NONE only while USB audio is streaming (see kWifiIdleSleepMs).
     WiFi.setAutoReconnect(true);
@@ -893,6 +967,12 @@ void loop() {
     delay(25);
 
     const uint32_t now = millis();
+    static uint32_t lastWifiSnapshotMs = 0;
+    if (uint32_t(now - lastWifiSnapshotMs) >= kWifiSnapshotIntervalMs) {
+        lastWifiSnapshotMs = now;
+        refreshWifiSnapshot();
+    }
+
     if (digitalRead(kWifiResetPin) == LOW) {
         if (!wifiResetPressedMs) wifiResetPressedMs = now;
         if (!wifiResetArmed &&
