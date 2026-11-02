@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# 打包 LAN MIC 插件为 macOS .pkg 安装器（双击进入图形安装向导）。
+# Package the LAN MIC plugins as a macOS .pkg installer (double-click for the graphical wizard).
 #
-# 用法:
+# Usage:
 #   ./make_pkg.sh [--version X.Y.Z] [--sign "Developer ID Installer: ..."] \
-#                 [-o 输出.pkg] [插件或目录]...
+#                 [-o output.pkg] [plugin-or-dir]...
 #
-# 说明:
-#   - 未指定插件时，自动在 vst3/build* 目录中查找 .vst3。
-#   - 插件最终安装到 /Library/Audio/Plug-Ins/VST3（安装时向用户请求管理员权限）。
-#   - 需要 App Store 分发时用 --sign 指定 Developer ID Installer 证书；
-#     本机/内部分发可不签名（首次打开会有 Gatekeeper 提示）。
+# Notes:
+#   - Without plugin arguments, .vst3 files are found under vst3/build*.
+#   - Plugins install to /Library/Audio/Plug-Ins/VST3 (admin rights requested during install).
+#   - Pass a Developer ID Installer certificate via --sign for App Store-style distribution;
+#     unsigned is fine for local/internal use (Gatekeeper warns on first open).
 #
-# 示例:
-#   ./make_pkg.sh                                  # 自动从 vst3/build* 打包
-#   ./make_pkg.sh ../vst3/build-universal          # 指定目录
+# Examples:
+#   ./make_pkg.sh                                  # auto-package from vst3/build*
+#   ./make_pkg.sh ../vst3/build-universal          # explicit directory
 #   ./make_pkg.sh --version 0.1.0 "LAN MIC Send.vst3" "LAN MIC Return.vst3"
 
 set -euo pipefail
@@ -47,14 +47,14 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# 版本号: 默认从 vst3/CMakeLists.txt 的 project(... VERSION ...) 解析
+# Version: parsed from project(... VERSION ...) in vst3/CMakeLists.txt by default.
 if [ -z "$VERSION" ]; then
     VERSION=$(sed -n 's/^project([^)]*VERSION \([0-9][0-9.]*\).*/\1/p' \
         "$REPO_ROOT/vst3/CMakeLists.txt" | head -n 1)
 fi
 [ -n "$VERSION" ] || VERSION="0.1.0"
 
-# 未指定插件时，默认搜索 vst3/build*
+# Default to searching vst3/build* when no plugins are given.
 if [ "${#TARGETS[@]}" -eq 0 ]; then
     shopt -s nullglob
     for d in "$REPO_ROOT"/vst3/build*; do
@@ -67,7 +67,7 @@ if [ "${#TARGETS[@]}" -eq 0 ]; then
     exit 1
 fi
 
-# 收集插件: 支持直接传插件，或传目录递归搜索
+# Collect plugins: accept plugin paths directly, or directories to search recursively.
 PLUGINS=()
 for t in "${TARGETS[@]}"; do
     if [ ! -e "$t" ]; then
@@ -94,7 +94,7 @@ if [ "${#PLUGINS[@]}" -eq 0 ]; then
     exit 1
 fi
 
-# 同名插件去重，保留修改时间最新的一个
+# Deduplicate plugins by name, keeping the newest by mtime.
 U_NAMES=(); U_PATHS=(); U_MTIME=()
 for src in "${PLUGINS[@]}"; do
     name=$(basename "$src")
@@ -113,7 +113,7 @@ for src in "${PLUGINS[@]}"; do
     fi
 done
 
-# 暂存区: dist/pkg/root 镜像目标文件系统布局
+# Staging area: dist/pkg/root mirrors the target filesystem layout.
 STAGE="$REPO_ROOT/dist/pkg"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/res" "$STAGE/scripts"
@@ -124,7 +124,7 @@ while [ "$i" -lt "${#U_NAMES[@]}" ]; do
     src="${U_PATHS[$i]}"
     name="${U_NAMES[$i]}"
 
-    # macOS 插件均为 bundle 目录，必须包含 Contents
+    # macOS plugins are bundle directories and must contain Contents.
     if [ ! -d "$src/Contents" ]; then
         echo "警告: $name 缺少 Contents 目录，不是有效的 macOS 插件包，已跳过" >&2
         i=$((i + 1))
@@ -156,7 +156,7 @@ if [ "${#LIST_PATHS[@]}" -eq 0 ]; then
     exit 1
 fi
 
-# postinstall: 修正插件属主和权限
+# postinstall: fix plugin ownership and permissions.
 {
     echo '#!/bin/bash'
     for p in "${LIST_PATHS[@]}"; do
@@ -167,12 +167,12 @@ fi
 } > "$STAGE/scripts/postinstall"
 chmod +x "$STAGE/scripts/postinstall"
 
-# 生成 distribution.xml（替换占位符）
+# Generate distribution.xml (replacing placeholders).
 sed -e "s/@IDENT@/$IDENT/g" -e "s/@TITLE@/$TITLE/g" \
     "$SCRIPT_DIR/pkg/distribution.xml" > "$STAGE/distribution.xml"
 cp "$SCRIPT_DIR/pkg/welcome.txt" "$STAGE/res/welcome.txt"
 
-# 打组件包
+# Build the component package.
 COMPONENT="$STAGE/lanmic-component.pkg"
 if [ -n "$SIGN" ]; then
     pkgbuild --root "$STAGE/root" --identifier "$IDENT" --version "$VERSION" \
@@ -184,7 +184,7 @@ else
         --scripts "$STAGE/scripts" "$COMPONENT"
 fi
 
-# 打产品包
+# Build the product package.
 if [ -z "$OUTPUT" ]; then
     OUTPUT="$REPO_ROOT/dist/LANMIC_${VERSION}.pkg"
 fi

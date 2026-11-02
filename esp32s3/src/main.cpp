@@ -152,23 +152,25 @@ struct DebugStats {
     // waitNotify(): overrun counts missed polling periods; anchor also counts
     // notifications, so anchor >= overrun. Normal deadline wakeups count neither.
     std::atomic<uint32_t> netPacerOverrun{0}, netPacerAnchor{0};
-    // 单轮循环工作耗时最大值（微秒，1 秒窗口；不含 pacer/backoff 睡眠）。
+    // Max work time of a single loop pass (microseconds, 1 s window; excludes pacer/backoff sleep).
     std::atomic<uint32_t> audioLoopMaxUs{0}, netLoopMaxUs{0};
-    // networkTask 分段耗时最大值（微秒，1 秒窗口）。
+    // Max per-phase work time inside networkTask (microseconds, 1 s window).
     std::atomic<uint32_t> netStateMaxUs{0}, netPollMaxUs{0};
     std::atomic<uint32_t> netControlMaxUs{0}, netAudioRxMaxUs{0}, netDownlinkMaxUs{0};
     std::atomic<uint32_t> netEncodeMaxUs{0}, netSendMaxUs{0};
     // Network diagnostics use cumulative timing, unaffected by serial window resets.
     std::atomic<uint32_t> receiveWorkUs{0}, encodeWorkUs{0};
     std::atomic<uint32_t> rawQueued{0}; // Sampled by the queue's consumer.
-    // 下行队列：push 失败=原始/编码队满丢下行帧；pop 失败=被入队通知
-    // 唤醒时编码队列已空（帧已被上一轮消费的通知竞态，应恒接近 0）。
+    // Downlink queues: push failure = a downlink frame dropped on a full
+    // raw/encoded queue; pop failure = woken by an enqueue notification when
+    // the encoded queue is already empty (notification race with the previous
+    // pass; should stay near 0).
     std::atomic<uint32_t> queuePushFail{0}, queuePopFail{0};
     std::atomic<uint32_t> rawPushFail{0}, encodedPushFail{0};
     std::atomic<uint32_t> rawTrimFrames{0}, encodedTrimFrames{0};
-    // PLC 补偿合成的帧数 / 上行 Opus 解码器复位次数（均自启动累计）。
+    // PLC-concealed frames / uplink Opus decoder resets (both cumulative since boot).
     std::atomic<uint32_t> plcFrames{0}, uplinkResets{0};
-    // UDP 发送失败次数（control 应答 + audio 下行两路，累计）。
+    // Failed UDP sends (control replies + audio downlink, cumulative).
     std::atomic<uint32_t> udpEndPacketFail{0};
     // Actual downlink sendto calls returning WouldBlock, not select snapshots.
     std::atomic<uint32_t> downlinkSendWouldBlock{0};
@@ -178,19 +180,19 @@ struct DebugStats {
     std::atomic<int32_t> lastEncodeError{0};
     std::atomic<uint32_t> captureGapMaxMs{0}, encodeGapMaxMs{0}, sendGapMaxMs{0};
     std::atomic<uint32_t> encodeWaitMaxMs{0}, sendWaitMaxMs{0}, sendAgeMaxMs{0};
-    // 最近一次 sendto hard error 的 errno（0=尚无）。
+    // errno of the most recent sendto hard error (0 = none yet).
     std::atomic<int32_t> controlSendErrno{0}, downlinkSendErrno{0};
-    // socket 重建原因细分（累计）。
+    // Breakdown of socket rebuild reasons (cumulative).
     std::atomic<uint32_t> socketPollReset{0}, controlReadReset{0}, controlSendReset{0};
     std::atomic<uint32_t> audioReadReset{0}, downlinkSendReset{0};
-    // WiFi modem sleep 状态切换次数（进/出省电各计一次，累计）。
+    // Wi-Fi modem sleep state transitions (entering/leaving each count once, cumulative).
     std::atomic<uint32_t> wifiSleepToggles{0};
-    // USB TX FIFO 可写空间窗口值（字节；min=最满时，max=最空时）。
+    // USB TX FIFO free-space window values (bytes; min = fullest, max = emptiest).
     std::atomic<int32_t> usbTxFifoMinFree{INT32_MAX};
     std::atomic<int32_t> usbTxFifoMaxFree{-1};
 };
-DebugStats stats; // 唯一统计块：热任务只写 relaxed 原子，loop 任务 1 Hz 读取。
-TaskHandle_t audioTaskHandle = nullptr, encoderTaskHandle = nullptr, networkTaskHandle = nullptr; // 供 1 Hz 栈高水位查询
+DebugStats stats; // Single stats block: hot tasks write relaxed atomics, loop() reads at 1 Hz.
+TaskHandle_t audioTaskHandle = nullptr, encoderTaskHandle = nullptr, networkTaskHandle = nullptr; // For the 1 Hz stack high-water query
 // Reserve internal RAM before heap fragmentation; Opus scratch is hot, PCM queues are not.
 alignas(portBYTE_ALIGNMENT) StackType_t encoderTaskStack[49152 / sizeof(StackType_t)];
 StaticTask_t encoderTaskControl;
@@ -313,7 +315,7 @@ struct Pacer {
   }
 
   static TickType_t usToTicks(int64_t us) {
-    return TickType_t((us + kTickUs - 1) / kTickUs); // 向上取整
+    return TickType_t((us + kTickUs - 1) / kTickUs); // Round up.
   }
 
   void setPeriodUs(int64_t us) {
@@ -323,10 +325,10 @@ struct Pacer {
   void wait() {
     TickType_t now = xTaskGetTickCount();
     if ((now - nextTick) < periodTicks) {
-      // 还没到点，阻塞到 nextTick
+      // Not due yet; block until nextTick.
       xTaskDelayUntil(&nextTick, periodTicks);
     } else {
-      // 已经超时，直接重锚，不追赶
+      // Already overdue; re-anchor instead of catching up.
       ++overrun;
       ++anchor;
       nextTick = now;
@@ -348,11 +350,11 @@ struct Pacer {
         nextTick = xTaskGetTickCount();
         return true;
       }
-      // 睡到网格点：本轮消耗掉该时段，网格前移一个周期
+      // Slept to the grid point: this pass consumed the slot, advance one period.
       nextTick = TickType_t(nextTick + periodTicks);
       return false;
     }
-    // 已超过一个完整轮询周期（中途退避睡眠或单轮工作超时）：重锚，不追赶
+    // More than a full polling period late (backoff sleep or work overrun mid-loop): re-anchor, no catch-up.
     ++overrun;
     ++anchor;
     nextTick = now;
@@ -387,7 +389,7 @@ void audioTask(void*) {
         return current + step;
     };
     for (;;) {
-        const int64_t audioLoopStartUs = esp_timer_get_time(); // 本轮起点，仅用于统计工作耗时
+        const int64_t audioLoopStartUs = esp_timer_get_time(); // Pass start, for work-time stats only.
         const uint32_t audioLoopNow = millis();
         // isStreamingActiveTx() can stay false on ESP32-S3 despite live ISO-IN.
         // Use the ISR completion counter, which advances once per millisecond.
@@ -493,13 +495,14 @@ void audioTask(void*) {
                     ++stats.capturedFrames;
                     frame.sequence = captureSequence++;
                     if (!downlinkReceiverActive.load(std::memory_order_acquire)) {
-                        // 没有手机接收端时不积压原始 PCM，避免恢复后发送旧音频。
+                        // Don't buffer raw PCM with no receiver, so recovery never sends stale audio.
                     } else if (!captured.push(&frame, 1)) {
                         ++stats.queuePushFail;
                         ++stats.rawPushFail;
                     } else if (encoderTaskHandle) {
-                        // 事件驱动下行：入队即唤醒 encoderTask，编码完成后
-                        // 再唤醒 networkTask 发送，避免网络任务内做 Opus encode。
+                        // Event-driven downlink: enqueue wakes encoderTask, which
+                        // wakes networkTask to send after encoding, keeping Opus
+                        // encode out of the network task.
                         xTaskNotifyGive(encoderTaskHandle);
                     }
                     frameUsed = 0;
@@ -608,10 +611,12 @@ void encoderTask(void*) {
 
 void networkTask(void*) {
     auto& microphone = audioQueues->microphone;
-    // Socket 轮询节拍（发现保活 + 上行接收 + 租约检查）。下行发送不依赖
-    // 该节拍：由 encoderTask 的入队通知驱动（见 waitNotify）。无 socket 时
-    // 降为 50 ms（重连本身是定时器驱动）。5 ms 轮询对 20 ms 的上行帧周期
-    // 引入的抖动被上行 300 ms 目标缓冲完全吸收。
+    // Socket polling cadence (discovery keepalive + uplink receive + lease
+    // checks). Downlink sends do not ride on it: they are driven by
+    // encoderTask's enqueue notifications (see waitNotify). With no socket it
+    // drops to 50 ms (reconnection is timer-driven anyway). The jitter that
+    // 5 ms polling adds to the 20 ms uplink frame period is fully absorbed by
+    // the 300 ms uplink target buffer.
     Pacer pacer{5000};
     NonBlockingUdp control, audio;
     NonBlockingUdp::Packet received;
@@ -624,7 +629,7 @@ void networkTask(void*) {
     uint32_t lastSentMs = millis();
     uint32_t lastDiagnosticsMs = 0, diagnosticsSequence = 0;
     bool socketsReady = false;
-    bool notified = false; // 上一轮 waitNotify 是被入队通知唤醒的（供消费块区分竞态空队列）
+    bool notified = false; // True when the last waitNotify woke on an enqueue notification (lets the consumer detect the empty-queue race).
     EncodedFrame pendingDownlink;
     IPAddress boundIp, currentIp;
     std::array<uint8_t, sos::kMaxPacketSize + 1> packet{};
@@ -677,7 +682,7 @@ void networkTask(void*) {
         receiver = Peer{};
     };
     for (;;) {
-        const int64_t netLoopStartUs = esp_timer_get_time(); // 本轮起点，仅用于统计工作耗时
+        const int64_t netLoopStartUs = esp_timer_get_time(); // Pass start, for work-time stats only.
         if (wifiResetInProgress.load(std::memory_order_acquire)) {
             if (socketsReady) {
                 control.stop();
@@ -859,7 +864,7 @@ void networkTask(void*) {
         if (!socketsReady || !receiver.active(attemptNow)) {
             downlinkReceiverActive.store(0, std::memory_order_release);
             encodedDownlink.clear();
-            ulTaskNotifyTake(pdTRUE, 0); // 丢帧后清掉残留通知，避免一次空唤醒
+            ulTaskNotifyTake(pdTRUE, 0); // Clear stale notifications after frame drops to avoid an empty wakeup.
             nextDownlinkAttemptMs = attemptNow;
             downlinkBackoffMs = 10;
             lastSentMs = attemptNow;
@@ -882,7 +887,7 @@ void networkTask(void*) {
                         std::min(downlinkBackoffMs * 2, uint32_t(100));
                     break;
                 }
-                if (!encodedDownlink.peek(pendingDownlink)) break; // 队列已排空
+                if (!encodedDownlink.peek(pendingDownlink)) break; // Queue drained.
                 sos::Header h{sos::Kind::AudioOpus, 0, bootSession,
                               pendingDownlink.sequence, pendingDownlink.capturedMs,
                               pendingDownlink.payloadBytes};
@@ -995,7 +1000,7 @@ void printStatsLine() {
     const uint32_t receiverActive = downlinkReceiverActive.load(std::memory_order_acquire);
     const uint32_t receiverEpoch = downlinkEpoch.load(std::memory_order_acquire);
     // Sample USB counters together before stack scans can delay this low-priority task.
-    const uint32_t usbTxCount = usb.getTxXferCount(); // ISR 侧累计完成数（volatile 字读取，跨任务安全）
+    const uint32_t usbTxCount = usb.getTxXferCount(); // ISR-side cumulative completions (volatile word read, cross-task safe).
     const uint32_t usbTxReadBytes = usb.getTxFifoReadTotal();
     const uint32_t usbRxCount = usb.getRxXferCount();
     const uint32_t usbRxBytes = usb.getRxTotalBytes();
@@ -1254,9 +1259,10 @@ void setup() {
     const auto audioResult = xTaskCreatePinnedToCore(
         audioTask, "sos-audio", 8192, nullptr, 4, &audioTaskHandle, 0);
     // shortcut: initial alloca budgets for 20 ms audio, remeasure high-water marks before changing codec settings.
-    // 编码独占 Core 1：Wi-Fi 重传多时 lwIP 高优先级任务会挤占共享核心，
-    // 拖慢编码导致 raw_trim 增长；networkTask 放 Core 0，被 audioTask(4)
-    // 抢占是安全方向，双向缓冲吸收其调度抖动。
+    // Encoding owns Core 1: under heavy Wi-Fi retransmits the high-priority
+    // lwIP tasks would crowd a shared core, slowing encoding and growing
+    // raw_trim; networkTask on Core 0 being preempted by audioTask (4) is the
+    // safe direction, with both-direction buffers absorbing its jitter.
     const auto netResult = xTaskCreatePinnedToCore(
         networkTask, "sos-network", 32768, nullptr, 3, &networkTaskHandle, 0);
     encoderTaskHandle = xTaskCreateStaticPinnedToCore(

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# 将 VST3 / AudioUnit (.component) / VST2 (.vst) 插件安装到 macOS 标准插件目录。
+# Install VST3 / AudioUnit (.component) / VST2 (.vst) plugins into the standard macOS plugin directories.
 #
-# 用法:
-#   ./install_vst_macos.sh [--user] <插件或目录>...
+# Usage:
+#   ./install_vst_macos.sh [--user] <plugin-or-dir>...
 #
-# 说明:
-#   - 目录会被递归搜索其中的插件；同名插件保留修改时间最新的一个。
-#   - 默认安装到系统目录（需要输入管理员密码），加 --user 安装到当前用户目录。
+# Notes:
+#   - Directories are searched recursively for plugins; for duplicate names the newest by mtime wins.
+#   - Installs to the system directory by default (admin password required); pass --user for the per-user directory.
 #
-# 示例:
+# Examples:
 #   ./install_vst_macos.sh LAN_MIC_Send.vst3
 #   ./install_vst_macos.sh --user ~/Downloads/lan_mic_return.vst3
 #   ./install_vst_macos.sh ../vst3/build
@@ -64,7 +64,7 @@ if [ "${#PLUGINS[@]}" -eq 0 ]; then
     exit 1
 fi
 
-# 同名插件去重，保留修改时间最新的一个（用于过滤 Debug/Release 等重复构建产物）
+# Deduplicate plugins by name, keeping the newest by mtime (filters Debug/Release build duplicates).
 U_NAMES=(); U_PATHS=(); U_MTIME=()
 for src in "${PLUGINS[@]}"; do
     name=$(basename "$src")
@@ -89,7 +89,7 @@ for i in "${!U_NAMES[@]}"; do
     name="${U_NAMES[$i]}"
     ext="${name##*.}"; ext=$(lower "$ext")
 
-    # macOS 上插件均为 bundle 目录，必须包含 Contents
+    # macOS plugins are bundle directories and must contain Contents.
     if [ ! -d "$src/Contents" ]; then
         echo "警告: $name 缺少 Contents 目录，不是有效的 macOS 插件包，已跳过" >&2
         continue
@@ -122,7 +122,7 @@ for i in "${!U_NAMES[@]}"; do
     $SUDO rm -rf "$dest"
     $SUDO ditto "$src" "$dest"
 
-    # 移除下载隔离标记，避免 DAW 拒绝加载（best-effort）
+    # Strip the download quarantine flag so DAWs will load it (best-effort).
     $SUDO xattr -dr com.apple.quarantine "$dest" 2>/dev/null || true
 
     echo "已安装: $name -> $dest"
