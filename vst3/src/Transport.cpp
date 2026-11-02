@@ -128,6 +128,20 @@ juce::String Transport::receiveDiagnostics() const {
     return text;
 }
 
+void Transport::resetDiagnostics() {
+    // Editor-thread writes race the network thread's fetch_add on display-only
+    // counters; a lost increment here is not worth a lock.
+    receivePackets_.store(0, std::memory_order_relaxed);
+    receivePlc_.store(0, std::memory_order_relaxed);
+    receiveLate_.store(0, std::memory_order_relaxed);
+    receiveDecodeErrors_.store(0, std::memory_order_relaxed);
+    incoming_.resetCounters();
+    const juce::ScopedLock lock(settingsLock_);
+    // Rebase on the last sample so the next report opens a fresh delta window.
+    previousDeviceDiagnostics_ = deviceDiagnostics_;
+    deviceDiagnosticsWindowMs_ = 0;
+}
+
 void Transport::prepareReceive() {
     const auto epoch = audioEpoch_.load(std::memory_order_acquire);
     if (epoch != consumedEpoch_) {

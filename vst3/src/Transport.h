@@ -15,6 +15,8 @@ public:
     juce::String preferredDevice() const;
     juce::String status() const;
     juce::String receiveDiagnostics() const;
+    // Zeroes the return-path counters and restarts the ESP delta window.
+    void resetDiagnostics();
     std::vector<Device> devices() const;
     void enqueue(const sos::Frame&, uint32_t now);
     void setReceiveSampleRate(double outputRate) {

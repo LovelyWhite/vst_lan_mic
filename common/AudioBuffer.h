@@ -108,6 +108,14 @@ public:
         for (int ch = 0; ch < Channels; ++ch) previous_[ch] = 0;
         fade_ = 0;
     }
+    // Zeroes the counters without dropping queued audio. handledOverflows_ must
+    // follow overflows, or the next prepare() trims on a stale mismatch.
+    void resetCounters() {
+        underruns.store(0, std::memory_order_relaxed);
+        trims.store(0, std::memory_order_relaxed);
+        overflows.store(0, std::memory_order_relaxed);
+        handledOverflows_ = 0;
+    }
     void prepare() {
         const auto size = queue.size();
         const auto overflowCount = overflows.load(std::memory_order_relaxed);
