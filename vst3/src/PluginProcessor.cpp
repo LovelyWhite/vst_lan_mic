@@ -41,23 +41,25 @@ void BridgeProcessor::resetSendResampler() {
     pendingSamples_ = 0;
     sendInputIndex_ = 0;
     nextSendOutputPosition_ = 0.0;
-    previousSendSample_ = 0.0f;
+    previousSendSample_[0] = previousSendSample_[1] = 0.0f;
     havePreviousSendSample_ = false;
 }
 
-void BridgeProcessor::appendNetworkSample(float sample, uint32_t now) {
-    pending_[pendingSamples_++] = sos::pcm16(sample);
+void BridgeProcessor::appendNetworkSample(const float* stereo, uint32_t now) {
+    pending_[pendingSamples_++] = sos::pcm16(stereo[0]);
+    pending_[pendingSamples_++] = sos::pcm16(stereo[1]);
     if (pendingSamples_ == pending_.size()) {
         network.enqueue(pending_, now);
         pendingSamples_ = 0;
     }
 }
 
-void BridgeProcessor::resampleSendSample(float sample, uint32_t now) {
+void BridgeProcessor::resampleSendSample(const float* stereo, uint32_t now) {
     if (!havePreviousSendSample_) {
-        previousSendSample_ = sample;
+        previousSendSample_[0] = stereo[0];
+        previousSendSample_[1] = stereo[1];
         havePreviousSendSample_ = true;
-        appendNetworkSample(sample, now);
+        appendNetworkSample(stereo, now);
         nextSendOutputPosition_ = sendStep_;
         return;
     }
@@ -67,11 +69,15 @@ void BridgeProcessor::resampleSendSample(float sample, uint32_t now) {
     while (nextSendOutputPosition_ <= currentPosition + 1.0e-9) {
         const auto fraction = float(std::clamp(
             nextSendOutputPosition_ - (currentPosition - 1.0), 0.0, 1.0));
-        appendNetworkSample(previousSendSample_ +
-            (sample - previousSendSample_) * fraction, now);
+        // One shared phase for both channels, so resampling cannot smear the image.
+        const float mixed[2]{
+            previousSendSample_[0] + (stereo[0] - previousSendSample_[0]) * fraction,
+            previousSendSample_[1] + (stereo[1] - previousSendSample_[1]) * fraction};
+        appendNetworkSample(mixed, now);
         nextSendOutputPosition_ += sendStep_;
     }
-    previousSendSample_ = sample;
+    previousSendSample_[0] = stereo[0];
+    previousSendSample_[1] = stereo[1];
 }
 
 bool BridgeProcessor::isBusesLayoutSupported(const BusesLayout& layout) const {
@@ -126,11 +132,13 @@ void BridgeProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
         const int inputChannels = std::min(getTotalNumInputChannels(), channels);
         if (active && network.connected() && inputChannels > 0) {
             for (int i = 0; i < buffer.getNumSamples(); ++i) {
-                float mono = 0;
-                for (int ch = 0; ch < inputChannels; ++ch)
-                    mono += buffer.getSample(ch, i);
-                resampleSendSample(
-                    mono / float(inputChannels) * gain_.getNextValue(), now);
+                const auto gain = gain_.getNextValue();
+                const auto left = buffer.getSample(0, i);
+                // A mono bus feeds both network channels, mirroring Return's fold.
+                const float stereo[2]{
+                    left * gain,
+                    (inputChannels > 1 ? buffer.getSample(1, i) : left) * gain};
+                resampleSendSample(stereo, now);
             }
         } else {
             resetSendResampler();

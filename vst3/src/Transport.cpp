@@ -73,7 +73,7 @@ juce::String Transport::status() const {
     return text;
 }
 
-void Transport::enqueue(const sos::Frame& pcm, uint32_t now) {
+void Transport::enqueue(const sos::OpusFrame& pcm, uint32_t now) {
     const Outgoing frame{pcm, now};
     outgoing_.push(&frame, 1);
 }
@@ -161,13 +161,13 @@ void Transport::run() {
         ? nullptr
         : opus_decoder_create(sos::kSampleRate, sos::kOpusChannels, &codecStatus);
     OpusEncoder* encoder = sending_
-        ? opus_encoder_create(sos::kSampleRate, int(sos::kUplinkChannels),
+        ? opus_encoder_create(sos::kSampleRate, int(sos::kOpusChannels),
                               OPUS_APPLICATION_AUDIO, &codecStatus)
         : nullptr;
     if (sending_ && encoder && codecStatus == OPUS_OK) {
         // Mirrors the firmware's downlink encoder profile; CBR keeps every
-        // uplink datagram at a predictable 320 bytes.
-        codecStatus = opus_encoder_ctl(encoder, OPUS_SET_BITRATE(sos::kUplinkBitrate));
+        // uplink datagram at a predictable 480 bytes.
+        codecStatus = opus_encoder_ctl(encoder, OPUS_SET_BITRATE(sos::kOpusBitrate));
         if (codecStatus == OPUS_OK)
             codecStatus = opus_encoder_ctl(encoder, OPUS_SET_VBR(0));
         if (codecStatus == OPUS_OK)

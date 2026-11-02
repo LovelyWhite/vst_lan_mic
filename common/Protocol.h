@@ -6,9 +6,9 @@
 
 namespace sos {
 constexpr uint32_t kMagic = 0x31534f53;
-// v8: the DAW-to-device uplink switched from 14 ms mono PCM (kind Audio,
-// removed) to 20 ms mono Opus; v7 carried mono PCM uplink and Opus downlink.
-constexpr uint8_t kVersion = 8;
+// v9: the DAW-to-device uplink became stereo Opus; v8 carried it as mono Opus
+// and v7 as 14 ms mono PCM (kind Audio, removed).
+constexpr uint8_t kVersion = 9;
 constexpr uint16_t kDiscoveryPort = 45678;
 constexpr uint16_t kUplinkPort = 45679;
 constexpr uint32_t kSampleRate = 48000;
@@ -18,10 +18,8 @@ constexpr size_t kOpusFrameSamples = 960;
 constexpr size_t kOpusChannels = 2;
 constexpr uint32_t kOpusFrameDurationMs = 20;
 // Stereo 192 kbps CBR over 20 ms is 480 bytes, still well inside the MTU.
+// Both directions share this profile.
 constexpr int kOpusBitrate = 192000;
-// Uplink (DAW -> device) Opus profile: mono at the same 20 ms framing.
-constexpr size_t kUplinkChannels = 1;
-constexpr int kUplinkBitrate = 192000;
 constexpr size_t kOpusMaxBytes = 512;
 constexpr size_t kHeaderSize = 28;
 constexpr size_t kMaxPacketSize = kHeaderSize + kOpusMaxBytes;
@@ -146,8 +144,7 @@ inline bool decode(const uint8_t* p, size_t size, Header& h) {
     return false;
 }
 
-// Uplink (DAW -> device) is mono Opus; downlink Opus frames are interleaved
-// stereo (L,R). Frame holds one direction's per-channel sample count.
-using Frame = std::array<int16_t, kOpusFrameSamples>;
+// Both directions carry interleaved stereo (L,R); one frame holds a single
+// 20 ms Opus packet's samples for both channels.
 using OpusFrame = std::array<int16_t, kOpusFrameSamples * kOpusChannels>;
 } // namespace sos

@@ -93,7 +93,13 @@ public:
     SpscRing<int16_t, queueCapacity> queue;
     std::atomic<uint32_t> underruns{0}, trims{0}, overflows{0};
 
-    void push(const Frame& frame) {
+    // Pushes one whole Opus frame. The size check keeps a frame built for the
+    // other channel count from being queued half-at-a-time, which would play
+    // back at the wrong pitch instead of failing.
+    template <size_t N>
+    void push(const std::array<int16_t, N>& frame) {
+        static_assert(N == kOpusFrameSamples * size_t(Channels),
+                      "Frame must match this playout's channel count");
         if (!queue.push(frame.data(), uint32_t(frame.size()))) ++overflows;
     }
     void setNominalRatio(float ratio) {
@@ -133,12 +139,6 @@ public:
                 (float(queue.size()) - float(target)) * 0.000002f));
         const float desired = nominalRatio_ * (1.0f + correction);
         ratio_ += (desired - ratio_) * 0.02f;
-    }
-    // Mono convenience wrapper; out[0] is the only channel when Channels == 1.
-    float next() {
-        float out[Channels];
-        next(out);
-        return out[0];
     }
     // Writes Channels interleaved floats (out[0] = L, out[1] = R when stereo).
     void next(float* out) {
@@ -188,6 +188,5 @@ private:
     float previous_[Channels] = {}, fadeFrom_[Channels] = {}, fade_ = 0;
     uint32_t handledOverflows_ = 0;
 };
-using MonoPlayout = Playout<1>;
 using StereoPlayout = Playout<2>;
 } // namespace sos

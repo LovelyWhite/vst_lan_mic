@@ -125,7 +125,7 @@ struct EncodedFrame {
     uint16_t payloadBytes = 0;
 };
 struct AudioQueues {
-    sos::MonoPlayout microphone; // Uplink (DAW -> phone) stays mono.
+    sos::StereoPlayout microphone; // Uplink (DAW -> phone) keeps the DAW's L/R.
     sos::SpscRing<CapturedFrame, 8> captured;
 };
 AudioQueues* audioQueues = nullptr; // PSRAM, initialized before any audio task starts.
@@ -442,9 +442,12 @@ void audioTask(void*) {
             for (int batch = 0; batch < 8 &&
                  usb.availableForWrite() >= int(sizeof(micSamples)); ++batch) {
                 for (size_t i = 0; i < 48; ++i) {
-                    const int16_t mono = fresh ? sos::pcm16(microphone.next()) : 0;
-                    micSamples[2 * i] = mono;
-                    micSamples[2 * i + 1] = mono;
+                    // True stereo uplink: pass the DAW's L/R through to USB IN
+                    // instead of duplicating one channel.
+                    float stereo[2]{0.0f, 0.0f};
+                    if (fresh) microphone.next(stereo);
+                    micSamples[2 * i] = sos::pcm16(stereo[0]);
+                    micSamples[2 * i + 1] = sos::pcm16(stereo[1]);
                 }
                 usb.bufferTx().writeArray(
                     reinterpret_cast<uint8_t*>(micSamples.data()),
@@ -635,16 +638,16 @@ void networkTask(void*) {
     std::array<uint8_t, sos::kMaxPacketSize + 1> packet{};
     NonBlockingUdp::Ready controlReady, audioReady;
 
-    // Uplink decoder mirrors the plugin's mono 20 ms encoder profile; like the
+    // Uplink decoder mirrors the plugin's stereo 20 ms encoder profile; like the
     // encoder it stays in internal RAM.
-    alignas(4) static sos::Frame decoded{};
-    const int opusDecoderBytes = opus_decoder_get_size(sos::kUplinkChannels);
+    alignas(4) static sos::OpusFrame decoded{};
+    const int opusDecoderBytes = opus_decoder_get_size(sos::kOpusChannels);
     void* opusDecoderMemory = opusDecoderBytes > 0
         ? heap_caps_malloc(size_t(opusDecoderBytes), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
         : nullptr;
     auto* opusDecoder = static_cast<OpusDecoder*>(opusDecoderMemory);
     int opusDecoderStatus = opusDecoder
-        ? opus_decoder_init(opusDecoder, sos::kSampleRate, sos::kUplinkChannels)
+        ? opus_decoder_init(opusDecoder, sos::kSampleRate, sos::kOpusChannels)
         : OPUS_ALLOC_FAIL;
     if (opusDecoderStatus != OPUS_OK) {
         S_PRINTF("Opus decoder initialization failed: %d\n", opusDecoderStatus);

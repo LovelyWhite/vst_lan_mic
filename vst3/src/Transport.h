@@ -18,7 +18,7 @@ public:
     // Zeroes the return-path counters and restarts the ESP delta window.
     void resetDiagnostics();
     std::vector<Device> devices() const;
-    void enqueue(const sos::Frame&, uint32_t now);
+    void enqueue(const sos::OpusFrame&, uint32_t now);
     void setReceiveSampleRate(double outputRate) {
         const auto safeRate = outputRate > 0.0 ? outputRate : double(sos::kSampleRate);
         incoming_.setNominalRatio(float(double(sos::kSampleRate) / safeRate));
@@ -31,7 +31,7 @@ public:
 
 private:
     struct Outgoing {
-        sos::Frame pcm{};
+        sos::OpusFrame pcm{}; // Interleaved L/R, one 20 ms frame.
         uint32_t timeMs = 0;
     };
     void run() override;

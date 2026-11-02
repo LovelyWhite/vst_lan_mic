@@ -5,24 +5,24 @@
 唯一的 C++ 协议定义位于 `common/Protocol.h`。固件和插件直接使用同一文件；
 `esp32s3/include/Protocol.h` 仅为转发头。Python 发现工具按相同格式读取。
 
-当前版本为 **8**，不兼容版本 7。使用时必须一起更新固件与两个插件。
-版本 8 将电脑到 ESP32 的上行从 14 ms 单声道 PCM 改为 20 ms 单声道 Opus，
-并删除 kind 5 Audio。两个方向都以 20 ms / 每声道 960 样本为 Opus 帧长：
-下行（ESP32 到电脑）为 48 kHz、立体声（交错 L/R）、192 kbps CBR，
-上行（电脑到 ESP32）为 48 kHz、单声道、192 kbps CBR，均使用音乐模式，
+当前版本为 **9**，不兼容版本 8。使用时必须一起更新固件与两个插件。
+版本 9 将电脑到 ESP32 的上行从单声道 Opus 改为立体声（交错 L/R）Opus；
+版本 8 曾把该方向从 14 ms 单声道 PCM 改为 20 ms 单声道 Opus，并删除
+kind 5 Audio。两个方向现在完全同构：48 kHz、立体声（交错 L/R）、
+192 kbps CBR，Opus 帧长均为 20 ms / 每声道 960 样本，使用音乐模式，
 不使用 Ogg 容器。
 
 ## 数据报
 
 所有多字节字段都显式按小端读写，不直接发送 C++ 结构体，不依赖结构体对齐或主机字节序。
-固定包头 28 字节。Opus payload 为 1 至 512 字节：下行 192 kbps CBR 的 20 ms 音频
-通常为 480 字节（整包 508 字节），上行同样为 192 kbps CBR、通常为 480 字节，
-加上 UDP/IPv4 头均远低于 1500 MTU，不需要 IP 分片。
+固定包头 28 字节。Opus payload 为 1 至 512 字节：两个方向都是 192 kbps CBR
+的 20 ms 音频，通常为 480 字节（整包 508 字节），加上 UDP/IPv4 头均远低于
+1500 MTU，不需要 IP 分片。
 
 | 偏移 | 字节 | 字段 | 说明 |
 | --- | --- | --- | --- |
 | 0 | 4 | magic | `0x31534f53`，线上字节为 `SOS1` |
-| 4 | 1 | version | `8` |
+| 4 | 1 | version | `9` |
 | 5 | 1 | kind | 1 Discover、2 Offer、3 Subscribe、4 Ack、6 AudioOpus、7 Diagnostics |
 | 6 | 2 | flags | Sender=1、Receiver=2、Busy=`0x8000` |
 | 8 | 4 | session | 非零会话 ID，Discover 可为零 |
@@ -34,14 +34,13 @@
 | 28 | 可变 | payload | 控制信息或裸 Opus packet |
 
 AudioOpus 用于两个音频方向，必须 flags=0，payloadBytes 为 1 至 512。
-下行（ESP32 到电脑）每包解码为每声道 960 个样本，按 L,R 交错存放（共 1920 个样本）；
-上行（电脑到 ESP32）每包解码为 960 个单声道样本。
+两个方向每包都解码为每声道 960 个样本，按 L,R 交错存放（共 1920 个样本）。
 Offer 必须 flags=0，负载为 1 至 64 字节 ASCII 设备身份，不带终止符。
 Discover、Subscribe、Ack 无负载。接收方拒绝错误版本、采样率、长度、保留字段或类型。
 
 ## 无串口设备诊断
 
-Diagnostics 是版本 8 的可选扩展，不修改音频包格式。旧插件忽略 kind 7；
+Diagnostics 是可选扩展，不修改音频包格式。旧插件忽略 kind 7；
 新插件连接旧固件时仍能传音频，但面板提示等待诊断。查看设备统计需要更新固件和
 Return 插件，不要求更新 Send 插件，也不需要开启 `LANMIC_ENABLE_SERIAL`。
 
@@ -78,9 +77,6 @@ Return 校验来源 IP、控制端口和开机会话，忽略重复及倒序诊�
 若增加，说明设备发送前已有丢帧；结合 `RX work/ENC work` 和发送阻塞计数区分处理
 负载与发送积压。若这些计数不增加，则继续检查 socket 成功提交之后的传输和电脑接收。
 `sent` 仅表示 socket 接收了数据，并不保证电脑收到。
-
-`common/Protocol.test.cpp` 提供独立 assert 自检，覆盖诊断负载往返、字节序、非法长度、
-RSSI 边界、头部校验和既有 v8 包兼容性；运行时必须启用断言。
 
 ## 发现与订阅
 
