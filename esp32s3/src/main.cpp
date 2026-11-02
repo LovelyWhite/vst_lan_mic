@@ -38,7 +38,7 @@
 // ---- Output control macros -------------------------------------------------
 // Define LANMIC_ENABLE_SERIAL to enable all Serial output.
 // Undefine or comment out for silent builds (e.g. field deployments).
-#define LANMIC_ENABLE_SERIAL
+// #define LANMIC_ENABLE_SERIAL
 
 #ifdef LANMIC_ENABLE_SERIAL
   #define S_INIT()               Serial.begin(115200)
@@ -158,6 +158,9 @@ struct DebugStats {
     std::atomic<uint32_t> netStateMaxUs{0}, netPollMaxUs{0};
     std::atomic<uint32_t> netControlMaxUs{0}, netAudioRxMaxUs{0}, netDownlinkMaxUs{0};
     std::atomic<uint32_t> netEncodeMaxUs{0}, netSendMaxUs{0};
+    // Network diagnostics use cumulative timing, unaffected by serial window resets.
+    std::atomic<uint32_t> receiveWorkUs{0}, encodeWorkUs{0};
+    std::atomic<uint32_t> rawQueued{0}; // Sampled by the queue's consumer.
     // 下行队列：push 失败=原始/编码队满丢下行帧；pop 失败=被入队通知
     // 唤醒时编码队列已空（帧已被上一轮消费的通知竞态，应恒接近 0）。
     std::atomic<uint32_t> queuePushFail{0}, queuePopFail{0};
@@ -562,6 +565,7 @@ void encoderTask(void*) {
         }
 
         const uint32_t backlog = captured.size();
+        stats.rawQueued.store(backlog, std::memory_order_relaxed);
         if (backlog > kMaxCapturedBacklogFrames) {
             const uint32_t trim = backlog - kMaxCapturedBacklogFrames;
             captured.discard(trim);
@@ -578,8 +582,9 @@ void encoderTask(void*) {
         const int encoded = opus_encode(
             opusEncoder, input.pcm.data(), int(sos::kOpusFrameSamples),
             output.payload.data(), int(output.payload.size()));
-        statsMax(stats.netEncodeMaxUs,
-                 uint32_t(esp_timer_get_time() - encodeStartUs));
+        const uint32_t encodeUs = uint32_t(esp_timer_get_time() - encodeStartUs);
+        statsMax(stats.netEncodeMaxUs, encodeUs);
+        stats.encodeWorkUs.fetch_add(encodeUs, std::memory_order_relaxed);
         if (encoded <= 0) {
             ++stats.encodeErrors;
             stats.lastEncodeError.store(encoded, std::memory_order_relaxed);
@@ -617,6 +622,7 @@ void networkTask(void*) {
     uint32_t nextDownlinkAttemptMs = 0;
     uint32_t downlinkBackoffMs = 10;
     uint32_t lastSentMs = millis();
+    uint32_t lastDiagnosticsMs = 0, diagnosticsSequence = 0;
     bool socketsReady = false;
     bool notified = false; // 上一轮 waitNotify 是被入队通知唤醒的（供消费块区分竞态空队列）
     EncodedFrame pendingDownlink;
@@ -839,8 +845,9 @@ void networkTask(void*) {
                 lastValidAudio = now;
                 lastUplinkMs.store(now, std::memory_order_release);
             }
-            statsMax(stats.netAudioRxMaxUs,
-                     uint32_t(esp_timer_get_time() - netPhaseStartUs));
+            const uint32_t receiveUs = uint32_t(esp_timer_get_time() - netPhaseStartUs);
+            statsMax(stats.netAudioRxMaxUs, receiveUs);
+            stats.receiveWorkUs.fetch_add(receiveUs, std::memory_order_relaxed);
         }
 
         // Catch up at 4 ms per packet; WouldBlock retains the head for backoff.
@@ -917,6 +924,36 @@ void networkTask(void*) {
         }
         statsMax(stats.netDownlinkMaxUs,
                  uint32_t(esp_timer_get_time() - netPhaseStartUs));
+        const uint32_t diagnosticsNow = millis();
+        if (socketsReady && receiver.active(diagnosticsNow) &&
+            uint32_t(diagnosticsNow - lastDiagnosticsMs) >= 1000) {
+            lastDiagnosticsMs = diagnosticsNow;
+            if (controlReady.write) {
+                const sos::DeviceDiagnostics diagnostics{
+                    stats.capturedFrames.load(std::memory_order_relaxed),
+                    stats.encodedFrames.load(std::memory_order_relaxed),
+                    stats.sentFrames.load(std::memory_order_relaxed),
+                    stats.rawPushFail.load(std::memory_order_relaxed),
+                    stats.encodedPushFail.load(std::memory_order_relaxed),
+                    stats.rawTrimFrames.load(std::memory_order_relaxed),
+                    stats.encodedTrimFrames.load(std::memory_order_relaxed),
+                    stats.encodeErrors.load(std::memory_order_relaxed),
+                    stats.downlinkSendWouldBlock.load(std::memory_order_relaxed),
+                    stats.downlinkPollBlocked.load(std::memory_order_relaxed),
+                    stats.plcFrames.load(std::memory_order_relaxed),
+                    stats.receiveWorkUs.load(std::memory_order_relaxed),
+                    stats.encodeWorkUs.load(std::memory_order_relaxed),
+                    stats.rawQueued.load(std::memory_order_relaxed), encodedDownlink.size(),
+                    wifiSnapshotRssi.load(std::memory_order_relaxed)};
+                const sos::Header h{sos::Kind::Diagnostics, 0, bootSession,
+                                    diagnosticsSequence++, diagnosticsNow,
+                                    uint16_t(sos::kDiagnosticsBytes)};
+                const auto bytes = sos::encode(packet.data(), h);
+                sos::encodeDiagnostics(packet.data() + sos::kHeaderSize, diagnostics);
+                // Best effort after audio: no retry, lease reset, or audio error accounting.
+                control.sendTo(controlReady, receiver.ip, receiver.port, packet.data(), bytes);
+            }
+        }
         // Poll at 5 ms while bound, 50 ms otherwise; notifications can wake sooner.
         pacer.setPeriodUs(socketsReady ? 5000 : 50000);
         // Loop work time only (pacer/backoff sleeps excluded).
@@ -1217,10 +1254,13 @@ void setup() {
     const auto audioResult = xTaskCreatePinnedToCore(
         audioTask, "sos-audio", 8192, nullptr, 4, &audioTaskHandle, 0);
     // shortcut: initial alloca budgets for 20 ms audio, remeasure high-water marks before changing codec settings.
+    // 编码独占 Core 1：Wi-Fi 重传多时 lwIP 高优先级任务会挤占共享核心，
+    // 拖慢编码导致 raw_trim 增长；networkTask 放 Core 0，被 audioTask(4)
+    // 抢占是安全方向，双向缓冲吸收其调度抖动。
     const auto netResult = xTaskCreatePinnedToCore(
-        networkTask, "sos-network", 32768, nullptr, 3, &networkTaskHandle, 1);
+        networkTask, "sos-network", 32768, nullptr, 3, &networkTaskHandle, 0);
     encoderTaskHandle = xTaskCreateStaticPinnedToCore(
-        encoderTask, "sos-encoder", sizeof(encoderTaskStack), nullptr, 2,
+        encoderTask, "sos-encoder", sizeof(encoderTaskStack), nullptr, 3,
         encoderTaskStack, &encoderTaskControl, 1);
     const BaseType_t encoderResult = encoderTaskHandle ? pdPASS : errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
     if (audioResult != pdPASS || encoderResult != pdPASS || netResult != pdPASS) {

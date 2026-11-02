@@ -49,6 +49,10 @@ private:
     std::atomic<uint32_t> receivePackets_{0}, receivePlc_{0}, receiveLate_{0};
     std::atomic<uint32_t> receiveDecodeErrors_{0}, receiveBufferedMs_{0};
     mutable juce::CriticalSection settingsLock_;
+    sos::DeviceDiagnostics deviceDiagnostics_{}, previousDeviceDiagnostics_{};
+    bool haveDeviceDiagnostics_ = false;
+    uint32_t deviceDiagnosticsAtMs_ = 0, deviceDiagnosticsTimestampMs_ = 0;
+    uint32_t deviceDiagnosticsSequence_ = 0, deviceDiagnosticsWindowMs_ = 0;
     juce::String preferred_, selected_;
     std::vector<Device> devices_;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Transport)

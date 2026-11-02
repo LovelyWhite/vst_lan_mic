@@ -16,14 +16,14 @@
 
 所有多字节字段都显式按小端读写，不直接发送 C++ 结构体，不依赖结构体对齐或主机字节序。
 固定包头 28 字节。Opus payload 为 1 至 512 字节：下行 192 kbps CBR 的 20 ms 音频
-通常为 480 字节（整包 508 字节），上行 128 kbps CBR 通常为 320 字节（整包 348 字节），
+通常为 480 字节（整包 508 字节），上行同样为 192 kbps CBR、通常为 480 字节，
 加上 UDP/IPv4 头均远低于 1500 MTU，不需要 IP 分片。
 
 | 偏移 | 字节 | 字段 | 说明 |
 | --- | --- | --- | --- |
 | 0 | 4 | magic | `0x31534f53`，线上字节为 `SOS1` |
 | 4 | 1 | version | `8` |
-| 5 | 1 | kind | 1 Discover、2 Offer、3 Subscribe、4 Ack、6 AudioOpus |
+| 5 | 1 | kind | 1 Discover、2 Offer、3 Subscribe、4 Ack、6 AudioOpus、7 Diagnostics |
 | 6 | 2 | flags | Sender=1、Receiver=2、Busy=`0x8000` |
 | 8 | 4 | session | 非零会话 ID，Discover 可为零 |
 | 12 | 4 | sequence | 每个音频方向独立的包序号，允许自然回绕 |
@@ -38,6 +38,49 @@ AudioOpus 用于两个音频方向，必须 flags=0，payloadBytes 为 1 至 512
 上行（电脑到 ESP32）每包解码为 960 个单声道样本。
 Offer 必须 flags=0，负载为 1 至 64 字节 ASCII 设备身份，不带终止符。
 Discover、Subscribe、Ack 无负载。接收方拒绝错误版本、采样率、长度、保留字段或类型。
+
+## 无串口设备诊断
+
+Diagnostics 是版本 8 的可选扩展，不修改音频包格式。旧插件忽略 kind 7；
+新插件连接旧固件时仍能传音频，但面板提示等待诊断。查看设备统计需要更新固件和
+Return 插件，不要求更新 Send 插件，也不需要开启 `LANMIC_ENABLE_SERIAL`。
+
+固件在音频发送处理之后，每秒最多从控制端口 45678 向有效 Receiver 的已登记端口
+发送一包诊断。复用非阻塞 socket，不新增端口、任务或动态分配；发送失败直接跳过，
+不重试、不清除租约、不计入音频发送失败。此统计仍会占用少量网络任务时间和带宽。
+包头 flags=0、session=设备开机 ID，sequence 为独立诊断序号，timestampMs 为设备采样
+时间，payloadBytes 必须为 64。负载为下表 16 个显式小端 32 位字段，不发送结构体内存：
+
+| 负载偏移 | 字段 | 含义 |
+| --- | --- | --- |
+| 0 / 4 / 8 | captured / encoded / sent | 累计采集、编码成功、socket 发送成功帧数 |
+| 12 / 16 | rawDrop / encodedDrop | 原始、编码队列入队失败次数 |
+| 20 / 24 | rawTrim / encodedTrim | 原始、编码队列累计裁剪帧数 |
+| 28 | encodeErrors | 累计编码错误次数 |
+| 32 / 36 | sendWouldBlock / pollBlocked | 音频发送暂不可用次数、存在待发帧但 socket 不可写次数 |
+| 40 | uplinkPlc | 设备解码 DAW 上行时累计补帧数，与 Return PLC 方向不同 |
+| 44 / 48 | receiveWorkUs / encodeWorkUs | 收包解码处理、Opus 编码累计墙钟微秒数，包含被抢占时间 |
+| 52 / 56 | rawQueued / encodedQueued | 队列帧数快照；原始队列由编码消费者采样 |
+| 60 | rssiDbm | 有符号 dBm，范围 -128 至 0；-128 表示未连接 |
+
+除队列快照和 RSSI 外，字段均为设备启动以来的无符号累计值，允许自然回绕。
+收包解码处理耗时包括包检查和 PLC，但不包括网络任务的等待；编码耗时不包括开始
+编码前的排队。两个耗时不能解释为 CPU 利用率，也不能直接相加计算单核负载。
+
+Return 校验来源 IP、控制端口和开机会话，忽略重复及倒序诊断包，不让诊断包增加
+音频 RX/PLC 或刷新音频超时。首包建立基线，之后显示相邻有效快照的计数增量及设备
+采样间隔；诊断丢包时窗口自然变长，超过 10 秒则重新建立基线。重连、切换设备和
+启停网络会清除基线。`ESP age` 是电脑收到最近有效诊断后经过的时间，达到 3 秒标为
+`STALE`，不是网络单程延迟。队列及各阶段计数并非同一瞬间的原子快照，不要求
+`cap/enc/sent` 每个窗口完全相等。
+
+排查有声时 PLC 增长：先看 `raw_drop/enc_drop/raw_trim/enc_trim` 是否同时增加。
+若增加，说明设备发送前已有丢帧；结合 `RX work/ENC work` 和发送阻塞计数区分处理
+负载与发送积压。若这些计数不增加，则继续检查 socket 成功提交之后的传输和电脑接收。
+`sent` 仅表示 socket 接收了数据，并不保证电脑收到。
+
+`common/Protocol.test.cpp` 提供独立 assert 自检，覆盖诊断负载往返、字节序、非法长度、
+RSSI 边界、头部校验和既有 v8 包兼容性；运行时必须启用断言。
 
 ## 发现与订阅
 

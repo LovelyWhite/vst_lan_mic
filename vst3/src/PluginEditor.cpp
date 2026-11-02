@@ -14,7 +14,10 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
     diagnostics_.setJustificationType(juce::Justification::topLeft);
     diagnostics_.setTooltip(
         "Return-path counters since this plugin instance was created. "
-        "late includes duplicate packets; buffer is sampled by the audio callback.");
+        "late includes duplicate packets; buffer is sampled by the audio callback. "
+        "ESP counters are deltas over the displayed device window, not lifetime totals. "
+        "RX/ENC work is elapsed wall time including preemption, not CPU usage. "
+        "Queue sizes are snapshots; STALE means no diagnostic update for 3 seconds.");
     if constexpr (!BridgeProcessor::sending) addAndMakeVisible(diagnostics_);
     gain_.setSliderStyle(juce::Slider::LinearHorizontal);
     gain_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 90, 24);
@@ -35,7 +38,7 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
         processor_.network.setPreferredDevice(index >= 0 && index < deviceIds_.size()
                                                  ? deviceIds_[index] : juce::String{});
     };
-    setSize(620, BridgeProcessor::sending ? 285 : 330);
+    setSize(620, BridgeProcessor::sending ? 285 : 420);
     timerCallback();
     startTimerHz(4);
 }
@@ -61,7 +64,7 @@ void BridgeEditor::resized() {
     auto switches = area.removeFromTop(36);
     enabled_.setBounds(switches.removeFromLeft(210));
     status_.setBounds(area.removeFromTop(28));
-    diagnostics_.setBounds(area.removeFromTop(44));
+    diagnostics_.setBounds(area);
 }
 
 void BridgeEditor::timerCallback() {
