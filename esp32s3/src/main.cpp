@@ -43,11 +43,9 @@
 #ifdef LANMIC_ENABLE_SERIAL
   #define S_INIT()               Serial.begin(115200)
   #define S_PRINTF(...)          Serial.printf(__VA_ARGS__)
-  #define S_FLUSH()              Serial.flush()
 #else
   #define S_INIT()               ((void)0)
   #define S_PRINTF(...)          ((void)0)
-  #define S_FLUSH()              ((void)0)
 #endif
 
 namespace {
@@ -146,21 +144,13 @@ std::atomic<int32_t> wifiSnapshotRssi{-128};
 char identity[64]{}, usbSerial[24]{};
 uint32_t bootSession = 0;
 
-// ---- Aggregated debug statistics: one CSV line per second, printed by ----
-// loop() on the Arduino task. Hot tasks only touch lock-free relaxed
-// atomics here -- no locks, no delays, no per-frame prints, so scheduling
-// and the ISR paths stay untouched. Event counters accumulate since boot;
-// window metrics (loop-time/FIFO max/min) are swapped out by the 1 Hz
-// reporter which also resets the cell for the next window.
+// Hot tasks update atomics; loop() prints at 1 Hz. Counters accumulate since
+// boot; window extrema are exchanged and reset by the reporter.
 struct DebugStats {
-    // audioTask Pacer 的超期/重锚次数（wait() 语义，超时即重锚、不追赶，
-    // 两者恒相等）。
+    // wait(): overrun == anchor; missed deadlines re-anchor without catch-up.
     std::atomic<uint32_t> audioPacerOverrun{0}, audioPacerAnchor{0};
-    // networkTask 轮询 Pacer 的超期/重锚次数。该 Pacer 只管 socket 轮询
-    // 节拍（5 ms/50 ms），下行发送由入队通知驱动，不占它。口径注意
-    // （见 Pacer::waitNotify）：到点自然醒来不计 overrun，n_ovr 只统计
-    // 错过一个完整轮询周期（退避后返回/单轮超时），与 a_ovr 不对齐；
-    // n_anch 另含通知提前唤醒的事件重锚，故 n_anch >= n_ovr。
+    // waitNotify(): overrun counts missed polling periods; anchor also counts
+    // notifications, so anchor >= overrun. Normal deadline wakeups count neither.
     std::atomic<uint32_t> netPacerOverrun{0}, netPacerAnchor{0};
     // 单轮循环工作耗时最大值（微秒，1 秒窗口；不含 pacer/backoff 睡眠）。
     std::atomic<uint32_t> audioLoopMaxUs{0}, netLoopMaxUs{0};
@@ -205,16 +195,9 @@ static_assert(sizeof(encoderTaskStack) == 49152, "Keep the measured encoder stac
 
 // Publish a window max/min via CAS so a better sample landing between the
 // reporter's read and reset can never be clobbered by a stale value.
-void statsMax(std::atomic<uint32_t>& cell, uint32_t value) {
-    uint32_t current = cell.load(std::memory_order_relaxed);
-    while (value > current &&
-           !cell.compare_exchange_weak(current, value,
-                                       std::memory_order_relaxed,
-                                       std::memory_order_relaxed)) {}
-}
-
-void statsMax(std::atomic<int32_t>& cell, int32_t value) {
-    int32_t current = cell.load(std::memory_order_relaxed);
+template <typename T>
+void statsMax(std::atomic<T>& cell, T value) {
+    T current = cell.load(std::memory_order_relaxed);
     while (value > current &&
            !cell.compare_exchange_weak(current, value,
                                        std::memory_order_relaxed,
@@ -310,9 +293,7 @@ struct Peer {
     }
 };
 
-// One FreeRTOS tick in microseconds, derived from the config instead of
-// assuming a 1 kHz tick so a tick-rate change cannot silently stretch the
-// hot loops.
+// Derive tick duration from FreeRTOS config rather than assuming 1 kHz.
 constexpr int64_t kTickUs = 1000000 / int64_t(configTICK_RATE_HZ);
 
 // Tick-anchored pacing avoids adding loop work to every relative delay;
@@ -320,10 +301,7 @@ constexpr int64_t kTickUs = 1000000 / int64_t(configTICK_RATE_HZ);
 struct Pacer {
   TickType_t periodTicks;
   TickType_t nextTick;
-  // Debug counters: a missed deadline is always re-anchored (never caught up
-  // in a burst). wait() 的两个计数恒相等；waitNotify() 的 anchor 另计
-  // 通知提前唤醒的事件重锚，故 anchor >= overrun。
-  // overrun=错过截止期次数；anchor=全部重锚次数（超期 + waitNotify 事件）。
+  // Counter semantics are documented in DebugStats.
   uint32_t overrun = 0, anchor = 0;
 
   explicit Pacer(int64_t periodUs) {
@@ -352,30 +330,17 @@ struct Pacer {
     }
   }
 
-  // 睡到下一个轮询截止期，但可被任务通知提前唤醒（用于 networkTask：
-  // encoderTask 每入队一帧下行数据就通知一次）。返回 true=被通知唤醒
-  // （消费侧据此区分「竞态空队列」与正常空探测），false=睡到截止期。
-  // 注意：任务通知是唤醒信号而非信号量——清零式取走不保证逐通知消费，
-  // 未发送的数据由下一次通知或轮询继续处理。
-  // 网格语义：进入时 now ∈ [nextTick, nextTick+period) 本轮有效，睡
-  // period-diff 到下一网格点；通知提前唤醒则以事件为准重锚网格（事件
-  // 驱动优先，轮询网格只是兜底）。overrun 只统计错过一个完整轮询周期
-  // （退避睡眠后返回/单轮工作超时）；anchor 另含通知重锚，故 n_anch
-  // >= n_ovr，与 audioTask 的 a_ovr 口径不同。
+  // Return true on a notification, re-anchoring to the wakeup tick.
+  // Notifications coalesce: pending frames still need later notifications or polls.
   bool waitNotify() {
     TickType_t now = xTaskGetTickCount();
     const TickType_t diff = TickType_t(now - nextTick);
     if (diff < periodTicks) {
-      // 等待时长必须用 period-diff 而不是 nextTick-now：本分支里
-      // now >= nextTick 恒成立，后者在 now==nextTick 时为 0——
-      // ulTaskNotifyTake(0) 立即返回，与下一轮的重锚分支形成乒乓自旋
-      // （曾以 n_ovr=21 万、core 1 烧满的形式复现）；在 now 领先 1~4
-      // tick 时则无符号回绕成 ~49 天超时，任务睡死——且队列随后压满、
-      // push 失败不再通知，再也无法唤醒。period-diff 恒在 (0, period]。
+      // period-diff stays in (0, period]; nextTick-now can spin at zero
+      // or underflow into a huge timeout, stalling the consumer.
       const TickType_t remaining = TickType_t(periodTicks - diff);
       if (ulTaskNotifyTake(pdTRUE, remaining) != 0) {
-        // 新帧提前唤醒：事件时刻即新网格锚点（不 ++overrun——这是提前
-        // 而非超期；重锚后下一轮 diff≈0，睡满一个兜底周期）。
+        // Read the tick after waking; a pre-wait timestamp would drift.
         ++anchor;
         nextTick = xTaskGetTickCount();
         return true;
@@ -409,10 +374,6 @@ void audioTask(void*) {
     std::array<int16_t, 96> micSamples{};
     int32_t speakerLeftGainQ16 = int32_t(kUsbUnityGainQ16);
     int32_t speakerRightGainQ16 = int32_t(kUsbUnityGainQ16);
-    // See the audio loop below for why the completion counter is the
-    // authority for TX liveness. lastUsbTxProgressMs starts at 0: no progress
-    // observed, so TX stays inactive until the first ISR-side transfer
-    // completes.
     uint32_t lastUsbTxCount = usb.getTxXferCount();
     uint32_t lastUsbTxProgressMs = 0;
     auto smoothGain = [](int32_t current, int32_t target) {
@@ -425,16 +386,8 @@ void audioTask(void*) {
     for (;;) {
         const int64_t audioLoopStartUs = esp_timer_get_time(); // 本轮起点，仅用于统计工作耗时
         const uint32_t audioLoopNow = millis();
-        // isStreamingActiveTx() reads ep_in, a field written by the USB
-        // device task/ISR and read here without cross-context ordering; the
-        // library documents platforms where it keeps returning false while
-        // ISO-IN transfers are actually running (USBAudioDeviceBase.h "known
-        // issues"), and the ESP32-S3 port reproduces it: snapshots showed
-        // txXfer climbing ~1k/s while tx=0 and the supply loop never ran,
-        // leaving the phone fed with zero-padding -- the DAW->phone stutter.
-        // Trust the ISR-side completion counter instead: audiod_xfer_cb()
-        // advances it once per millisecond only while the IN pipe is live,
-        // so recent progress is proof of a streaming alt setting.
+        // isStreamingActiveTx() can stay false on ESP32-S3 despite live ISO-IN.
+        // Use the ISR completion counter, which advances once per millisecond.
         const uint32_t usbTxCount = usb.getTxXferCount();
         const bool usbTxProgress = usbTxCount != lastUsbTxCount;
         const uint32_t sinceProgressMs = audioLoopNow - lastUsbTxProgressMs;
@@ -470,22 +423,10 @@ void audioTask(void*) {
         txWasActive = txActive;
         uplinkWasFresh = fresh;
 
-        // Top the USB IN FIFO up to (almost) full on every pass. Flow control
-        // drains one 192-byte stereo packet per millisecond and zero-pads any
-        // shortfall -- audible as a click. The steady FIFO level IS the stall
-        // budget: the old 1536-byte floor was 8 ms in stereo and the observed
-        // 5-6 ms scheduling jitter emptied it (debug usbTx=0..1536 with
-        // usbTxGapMax=5), and even the 15 ms of a 16-packet FIFO still let the
-        // rarer longer stalls -- flash cache misses, WiFi internals -- surface
-        // as isolated clicks. The config now sizes the FIFO at 48 packets
-        // (~47 ms); this full top-up is what holds that level steady.
-        // Checking free space avoids Audio Tools' blocking write retry path,
-        // and the free-space gate doubles as the poison-pill filter here:
-        // write() re-checks the same unreliable isStreamingActiveTx() flag
-        // and silently discards the packet while reporting success, so feed
-        // bufferTx() directly (the only other writer is this task, and the
-        // ISR-side xfer callback only drains, so the free-space observation
-        // cannot go stale towards "less room").
+        // Keep the 48-packet FIFO nearly full to absorb ~47 ms scheduling stalls.
+        // Feed bufferTx() directly: write() can block or silently discard data
+        // because of the unreliable TX-active flag. This task is the only writer;
+        // the ISR only drains, so checked free space cannot shrink before writing.
         if (txActive) {
             // Track writable space: min shows how full the FIFO stayed, max
             // shows whether it ever approached empty during this window.
@@ -655,10 +596,8 @@ void encoderTask(void*) {
         if (!encodedDownlink.push(&output, 1)) {
             ++stats.queuePushFail;
             ++stats.encodedPushFail;
-            if (networkTaskHandle) xTaskNotifyGive(networkTaskHandle);
-        } else if (networkTaskHandle) {
-            xTaskNotifyGive(networkTaskHandle);
         }
+        if (networkTaskHandle) xTaskNotifyGive(networkTaskHandle);
     }
 }
 
@@ -717,6 +656,20 @@ void networkTask(void*) {
         resetUplink();
         ++uplinkEpoch;
     };
+    auto invalidateReceiver = [&] {
+        receiver = Peer{};
+        downlinkReceiverActive.store(0, std::memory_order_release);
+        ++downlinkEpoch;
+        encodedDownlink.clear();
+        if (encoderTaskHandle) xTaskNotifyGive(encoderTaskHandle);
+    };
+    auto resetSockets = [&] {
+        control.stop();
+        audio.stop();
+        socketsReady = false;
+        invalidateSender();
+        receiver = Peer{};
+    };
     for (;;) {
         const int64_t netLoopStartUs = esp_timer_get_time(); // 本轮起点，仅用于统计工作耗时
         if (wifiResetInProgress.load(std::memory_order_acquire)) {
@@ -736,12 +689,7 @@ void networkTask(void*) {
             wifiSnapshotConnected.load(std::memory_order_acquire) != 0;
         currentIp = IPAddress(wifiSnapshotIpRaw.load(std::memory_order_acquire));
         if (!wifiConnected || (socketsReady && boundIp != currentIp)) {
-            if (socketsReady) {
-                control.stop(); audio.stop();
-                socketsReady = false;
-                invalidateSender();
-                receiver = Peer{};
-            }
+            if (socketsReady) resetSockets();
             if (uint32_t(now - lastRetry) >= 5000) {
                 lastRetry = now;
                 WiFi.reconnect();
@@ -763,13 +711,7 @@ void networkTask(void*) {
         }
 
         if (sender.port && !sender.active(now)) invalidateSender();
-        if (receiver.port && !receiver.active(now)) {
-            receiver = Peer{};
-            downlinkReceiverActive.store(0, std::memory_order_release);
-            ++downlinkEpoch;
-            encodedDownlink.clear();
-            if (encoderTaskHandle) xTaskNotifyGive(encoderTaskHandle);
-        }
+        if (receiver.port && !receiver.active(now)) invalidateReceiver();
         statsMax(stats.netStateMaxUs,
                  uint32_t(esp_timer_get_time() - netPhaseStartUs));
 
@@ -777,10 +719,7 @@ void networkTask(void*) {
             netPhaseStartUs = esp_timer_get_time();
             if (!NonBlockingUdp::poll(control, controlReady, audio, audioReady)) {
                 ++stats.socketPollReset;
-                control.stop(); audio.stop();
-                socketsReady = false;
-                invalidateSender();
-                receiver = Peer{};
+                resetSockets();
             }
             statsMax(stats.netPollMaxUs,
                      uint32_t(esp_timer_get_time() - netPhaseStartUs));
@@ -792,10 +731,7 @@ void networkTask(void*) {
                 const int got = control.read(controlReady, packet.data(), packet.size(), received);
                 if (got < 0) {
                     ++stats.controlReadReset;
-                    control.stop(); audio.stop();
-                    socketsReady = false;
-                    invalidateSender();
-                    receiver = Peer{};
+                    resetSockets();
                     break;
                 }
                 if (!got) break;
@@ -853,10 +789,7 @@ void networkTask(void*) {
                 const int got = audio.read(audioReady, packet.data(), packet.size(), received);
                 if (got < 0) {
                     ++stats.audioReadReset;
-                    control.stop(); audio.stop();
-                    socketsReady = false;
-                    invalidateSender();
-                    receiver = Peer{};
+                    resetSockets();
                     break;
                 }
                 if (!got) break;
@@ -910,19 +843,10 @@ void networkTask(void*) {
                      uint32_t(esp_timer_get_time() - netPhaseStartUs));
         }
 
-        // Keep every produced frame and catch up at 4 ms per packet against a
-        // 20 ms production period: the phone playout buffer absorbs the burst
-        // with no audible hole, while dropping to the newest frame punched a
-        // 20 ms gap into the stream for every scheduler hiccup. WouldBlock
-        // retains the head frame for bounded-backoff retry; backlog trimming
-        // still bounds queued latency if congestion persists.
-        // 下行为事件驱动：encoderTask 每入队一帧即以任务通知唤醒本任务
-        //（另有 5 ms 轮询兜底）。通知只是唤醒信号而非信号量——清零式
-        // 取走不保证逐通知消费，唤醒后最多发送少量已编码帧，避免 sendto
-        // 把 networkTask 单轮拉长；未发完的帧由下一次唤醒（新通知或轮询
-        // 到点，最迟 5 ms）继续。
-        // queuePopFail 只在「被通知唤醒却已空」时计数（帧已被上一轮消费
-        // 的通知竞态）；循环内排空后的 pop 失败是正常终止，不计。
+        // Catch up at 4 ms per packet; WouldBlock retains the head for backoff.
+        // Trim only excess backlog to bound latency without dropping every older frame.
+        // Notifications wake bounded batches; 5 ms polling covers coalesced notifications.
+        // queuePopFail counts only notified-but-empty races, not normal queue draining.
         netPhaseStartUs = esp_timer_get_time();
         const uint32_t attemptNow = millis();
         if (!socketsReady || !receiver.active(attemptNow)) {
@@ -980,11 +904,7 @@ void networkTask(void*) {
                         ++stats.downlinkSendReset;
                         stats.downlinkSendErrno.store(audio.lastError(),
                                                       std::memory_order_relaxed);
-                        receiver = Peer{};
-                        downlinkReceiverActive.store(0, std::memory_order_release);
-                        ++downlinkEpoch;
-                        encodedDownlink.clear();
-                        if (encoderTaskHandle) xTaskNotifyGive(encoderTaskHandle);
+                        invalidateReceiver();
                     } else {
                         ++stats.downlinkSendWouldBlock;
                     }
@@ -997,10 +917,7 @@ void networkTask(void*) {
         }
         statsMax(stats.netDownlinkMaxUs,
                  uint32_t(esp_timer_get_time() - netPhaseStartUs));
-        // Socket 轮询档位：绑定 socket 后 5 ms（发现保活 + 上行接收 +
-        // 租约检查；发现/订阅时延从 1 ms 放宽到 5 ms，对交互无感），
-        // 无 socket 时 50 ms（重连是定时器驱动，轮询无事可做）。
-        // 下行发送不在此节拍上：encoderTask 入队通知会提前唤醒（waitNotify）。
+        // Poll at 5 ms while bound, 50 ms otherwise; notifications can wake sooner.
         pacer.setPeriodUs(socketsReady ? 5000 : 50000);
         // Loop work time only (pacer/backoff sleeps excluded).
         statsMax(stats.netLoopMaxUs,
@@ -1011,16 +928,15 @@ void networkTask(void*) {
     }
 }
 
-// 1 Hz statistics on the low-priority Arduino loop task; no per-frame prints.
-// UART wire time exceeds 100 ms at 115200 baud; lower priority does not remove
-// shared driver/heap overhead. Stack and heap scans run once every 5 seconds.
-// 字段名直接嵌在每行里（name=value），无需单独表头。各字段含义/单位：
-// t_ms=毫秒；*_ovr/*_anch/*_fail/*_frames/*_rst/*_tog=自启动累计次数
-// （n_ovr 仅统计错过一个完整轮询周期、n_anch 另含通知事件重锚，与 a_* 口径不同，见 waitNotify）；
-// *_loop_max_us/n_*_us=微秒；usb_tx_xfer=窗口内 ISO-IN 完成次数增量；stats_window_ms=实际统计间隔；
-// usb_fifo_*=可写字节（-1=未采样）；
-// rssi_dbm=dBm（未连接 -128）；*_stack_min_b=任务栈最小剩余字节（0=任务未创建）；
-// health_age_ms=栈及 heap/minHeap/maxBlock 缓存的采样年龄（毫秒）。
+// 1Hz stats run on low-priority loop; no per-frame prints. UART transmission
+// at 115200 baud takes >100ms; low priority avoids blocking realtime tasks.
+// Stack/heap sampled every 5s. Inline name=value fields, no header. Key units:
+// t_ms: timestamp; *_ovr/*_anch/*_fail/*_frames/*_rst/*_tog: cumulative counts
+// (n_ovr = missed polling cycles; n_anch includes notification re-anchors, differs from a_* metrics, see waitNotify);
+// *_loop_max_us/n_*_us: microsecond max latencies; usb_tx_xfer: ISO-IN transfers in window;
+// stats_window_ms: actual sample interval; usb_fifo_*: free bytes (-1=unsampled);
+// rssi_dbm: Wi-Fi RSSI (-128=disconnected); *_stack_min_b: min remaining task stack bytes (0=task not created);
+// health_age_ms: age of cached stack/heap samples in ms.
 #ifdef LANMIC_ENABLE_SERIAL
 void printStatsLine() {
     static uint32_t lastUsbTxCount = 0, lastStatsMs = 0;
@@ -1095,7 +1011,7 @@ void printStatsLine() {
         stats.usbTxFifoMinFree.exchange(INT32_MAX, std::memory_order_relaxed);
     const int32_t fifoMax =
         stats.usbTxFifoMaxFree.exchange(-1, std::memory_order_relaxed);
-    const long rssi = wifiSnapshotRssi.load(std::memory_order_acquire); // dBm，未连接打印 -128
+    const long rssi = wifiSnapshotRssi.load(std::memory_order_acquire);
     static bool healthSampled = false;
     static uint32_t lastHealthMs = 0;
     static uint32_t audioStackMin = 0, encoderStackMin = 0, netStackMin = 0;
@@ -1235,13 +1151,8 @@ void setup() {
     // The descriptor reserves 49 samples, but flow control sends exactly
     // 48 stereo samples (192 bytes) per 1 ms frame at 48 kHz.
     config.enable_ep_in_flow_control = true;
-    // The IN flow control zero-pads -- an audible click -- as soon as the ISR
-    // outruns the supply task, so the steady FIFO level IS the stall budget:
-    // 16 packets covered the observed 5-6 ms scheduling jitter but not the
-    // rarer longer stalls (flash cache misses, WiFi internals) that surfaced
-    // as occasional DAW->phone clicks. 48 packets lift the budget to ~47 ms
-    // for ~32 ms more uplink latency, hidden by the 300 ms playout buffer;
-    // bufferRx() grows the same way and only ever dropped while full.
+    // 48 packets absorb stalls that exceeded the old 16-packet FIFO, avoiding
+    // audible IN zero-padding; adds ~32 ms latency and also enlarges bufferRx().
     config.fifo_packets = 48;
     config.rx_start_fill_percent = 0;
     // Host volume controls the phone-playback (USB OUT) path in audioTask.
