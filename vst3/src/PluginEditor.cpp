@@ -10,6 +10,12 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
     deviceLabel_.setText("Device", juce::dontSendNotification);
     gainLabel_.setText("Network gain", juce::dontSendNotification);
     status_.setMinimumHorizontalScale(0.65f);
+    diagnostics_.setFont(juce::FontOptions(13.0f));
+    diagnostics_.setJustificationType(juce::Justification::topLeft);
+    diagnostics_.setTooltip(
+        "Return-path counters since this plugin instance was created. "
+        "late includes duplicate packets; buffer is sampled by the audio callback.");
+    if constexpr (!BridgeProcessor::sending) addAndMakeVisible(diagnostics_);
     gain_.setSliderStyle(juce::Slider::LinearHorizontal);
     gain_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 90, 24);
     gain_.setTextValueSuffix(" dB");
@@ -29,7 +35,7 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
         processor_.network.setPreferredDevice(index >= 0 && index < deviceIds_.size()
                                                  ? deviceIds_[index] : juce::String{});
     };
-    setSize(620, 285);
+    setSize(620, BridgeProcessor::sending ? 285 : 330);
     timerCallback();
     startTimerHz(4);
 }
@@ -55,6 +61,7 @@ void BridgeEditor::resized() {
     auto switches = area.removeFromTop(36);
     enabled_.setBounds(switches.removeFromLeft(210));
     status_.setBounds(area.removeFromTop(28));
+    diagnostics_.setBounds(area.removeFromTop(44));
 }
 
 void BridgeEditor::timerCallback() {
@@ -73,4 +80,6 @@ void BridgeEditor::timerCallback() {
     device_.setSelectedId(selected.isEmpty() ? 1 : deviceIds_.indexOf(selected) + 2,
                           juce::dontSendNotification);
     status_.setText(processor_.displayStatus(), juce::dontSendNotification);
+    if constexpr (!BridgeProcessor::sending)
+        diagnostics_.setText(processor_.network.receiveDiagnostics(), juce::dontSendNotification);
 }

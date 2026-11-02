@@ -14,6 +14,7 @@ public:
     void setPreferredDevice(const juce::String&);
     juce::String preferredDevice() const;
     juce::String status() const;
+    juce::String receiveDiagnostics() const;
     std::vector<Device> devices() const;
     void enqueue(const sos::Frame&, uint32_t now);
     void setReceiveSampleRate(double outputRate) {
@@ -45,6 +46,8 @@ private:
     uint32_t consumedEpoch_ = 0; // Audio-thread owned.
     sos::SpscRing<Outgoing, 64> outgoing_;
     sos::StereoPlayout incoming_; // Downlink arrives as interleaved stereo.
+    std::atomic<uint32_t> receivePackets_{0}, receivePlc_{0}, receiveLate_{0};
+    std::atomic<uint32_t> receiveDecodeErrors_{0}, receiveBufferedMs_{0};
     mutable juce::CriticalSection settingsLock_;
     juce::String preferred_, selected_;
     std::vector<Device> devices_;

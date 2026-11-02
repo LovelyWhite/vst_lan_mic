@@ -80,6 +80,17 @@ void Transport::enqueue(const sos::Frame& pcm, uint32_t now) {
 
 void Transport::invalidateAudio() { ++audioEpoch_; }
 
+juce::String Transport::receiveDiagnostics() const {
+    return "RX=" + juce::String(receivePackets_.load(std::memory_order_relaxed))
+        + " | buffer=" + juce::String(receiveBufferedMs_.load(std::memory_order_relaxed)) + " ms"
+        + " | PLC=" + juce::String(receivePlc_.load(std::memory_order_relaxed))
+        + " | late=" + juce::String(receiveLate_.load(std::memory_order_relaxed))
+        + "\nunderrun=" + juce::String(incoming_.underruns.load(std::memory_order_relaxed))
+        + " | trim=" + juce::String(incoming_.trims.load(std::memory_order_relaxed))
+        + " | overflow=" + juce::String(incoming_.overflows.load(std::memory_order_relaxed))
+        + " | decode_err=" + juce::String(receiveDecodeErrors_.load(std::memory_order_relaxed));
+}
+
 void Transport::prepareReceive() {
     const auto epoch = audioEpoch_.load(std::memory_order_acquire);
     if (epoch != consumedEpoch_) {
@@ -87,6 +98,10 @@ void Transport::prepareReceive() {
         consumedEpoch_ = epoch;
     }
     incoming_.prepare();
+    // Read queue occupancy on its consumer thread, not from the editor.
+    receiveBufferedMs_.store(
+        incoming_.queue.size() * 1000u / (sos::kSampleRate * sos::kOpusChannels),
+        std::memory_order_relaxed);
 }
 
 void Transport::run() {
@@ -334,10 +349,14 @@ void Transport::run() {
                 } else if (!sending_ && enabled && connected() &&
                            h.kind == sos::Kind::AudioOpus &&
                            source == peerIp && port == sos::kUplinkPort && h.session == peerBoot) {
+                    receivePackets_.fetch_add(1, std::memory_order_relaxed);
                     uint32_t gap = 0;
                     if (sequenceValid) {
                         gap = h.sequence - nextSequence;
-                        if (gap >= 0x80000000u) continue; // Duplicate or late packet.
+                        if (gap >= 0x80000000u) {
+                            receiveLate_.fetch_add(1, std::memory_order_relaxed);
+                            continue; // Duplicate or late packet.
+                        }
                     }
                     if (gap > kMaxPlcFrames)
                         opus_decoder_ctl(decoder, OPUS_RESET_STATE);
@@ -354,9 +373,11 @@ void Transport::run() {
                             decodeOk = false;
                             break;
                         }
+                        receivePlc_.fetch_add(1, std::memory_order_relaxed);
                         if (!incoming_.queue.push(decoded.data(),
-                                uint32_t(samples) * sos::kOpusChannels))
-                            invalidateAudio();
+                                uint32_t(samples) * sos::kOpusChannels)) {
+                            incoming_.overflows.fetch_add(1, std::memory_order_relaxed);
+                        }
                     }
 
                     const int samples = decodeOk
@@ -365,14 +386,15 @@ void Transport::run() {
                                       int(sos::kOpusFrameSamples), 0)
                         : OPUS_INTERNAL_ERROR;
                     if (samples != int(sos::kOpusFrameSamples)) {
+                        receiveDecodeErrors_.fetch_add(1, std::memory_order_relaxed);
                         resetStreamState();
                         invalidateAudio();
                         continue;
                     }
                     if (!incoming_.queue.push(decoded.data(),
                             uint32_t(samples) * sos::kOpusChannels)) {
-                        // A paused DAW must not replay old queued samples on resume.
-                        invalidateAudio();
+                        // The audio consumer trims backlog without clearing its priming buffer.
+                        incoming_.overflows.fetch_add(1, std::memory_order_relaxed);
                     }
                     nextSequence = h.sequence + 1;
                     sequenceValid = true;

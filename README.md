@@ -1,236 +1,195 @@
 # LAN MIC
 
-## 项目目标
+LAN MIC 是 [suxitech](https://suxitech.cn) 的局域网双向音频桥，由 ESP32-S3 USB 音频设备与两个 JUCE VST3 插件组成。
 
-使用 `ESP32-S3` 作为 Android 手机的外置 USB 耳麦，实现电脑与手机之间的双向音频传输。
+设备通过 USB 连接手机，通过 Wi-Fi 连接电脑所在的局域网，让 DAW 的音频作为手机麦克风输入，同时把手机播放的音频送回 DAW，用于直播、通话、录音和音频处理。
 
-音频源来自电脑端 DAW（通过 VST3 插件），手机播放的音频也可回传到电脑 DAW。
+## 主要功能
 
-- ESP32-S3 枚举为 USB 立体声耳麦（USB IN 麦克风 + USB OUT 播放）
-- 上行链路：电脑 → ESP32 → 手机麦克风
-- 下行链路：手机播放 → ESP32 → 电脑 DAW
-- 两个 VST3 插件：`LAN MIC Send`（发送，构建目标 `lan_mic_send`）和
-  `LAN MIC Return`（接收，构建目标 `lan_mic_return`）
-- 无需固定 IP，自动发现 ESP32 设备
-- 网络与 USB 固定 48 kHz，VST 自动转换 DAW 工程采样率；下行（手机→DAW）网络立体声，上行（DAW→手机）网络单声道，立体声 USB 接口
-- 使用 `arduino-audio-tools` 库实现音频处理
-- 代码精简，避免重复代码
-- 音频需要稳定传输，不出现卡顿或延迟
-- 支持 iphone 和 android 手机
+- **双向传输**：电脑到手机、手机到电脑可同时工作，也可独立使用。
+- **USB 音频设备**：以 UAC2 耳麦形式提供麦克风输入和立体声播放通道。
+- **两个独立插件**：`LAN MIC Send` 负责发送，`LAN MIC Return` 负责接收。
+- **自动发现设备**：通过局域网广播发现，也可在插件中按设备名称选择。
+- **双向 Opus 编解码**：固定 20 ms 帧长，手机回传保留左右声道。
+- **采样率转换**：网络和 USB 固定为 48 kHz，插件自动适配 DAW 工程采样率。
+- **网页配网**：通过设备热点配置 Wi-Fi，按键可清除已保存的网络凭据。
+- **跨平台插件**：提供 macOS 和 Windows 的 VST3 构建及安装包脚本。
+
+## 系统架构
+
+```text
+电脑 DAW -> LAN MIC Send   -> 局域网 UDP -> ESP32-S3 -> USB IN  -> 手机麦克风
+电脑 DAW <- LAN MIC Return <- 局域网 UDP <- ESP32-S3 <- USB OUT <- 手机播放
+```
+
+USB IN / OUT 以手机这一 USB Host 的视角命名：IN 是手机读取的麦克风音频，OUT 是手机送出的播放音频。
+
+### 音频规格
+
+| 项目 | 电脑到手机 | 手机到电脑 |
+| --- | --- | --- |
+| 插件 | LAN MIC Send | LAN MIC Return |
+| 网络编码 | Opus，单声道 | Opus，立体声 |
+| 码率 | 192 kbps CBR | 192 kbps CBR |
+| 采样率 | 48 kHz | 48 kHz |
+| 帧长 | 20 ms，每声道 960 个采样 | 20 ms，每声道 960 个采样 |
+| USB 格式 | PCM16，单声道复制到左右通道 | PCM16，保留左右通道 |
+| 接收端目标缓冲 | 设备端 300 ms | Return 插件 500 ms |
+
+USB 两个方向均为 48 kHz、16 bit、双通道；USB IN 按每毫秒 192 字节供数。目标缓冲不是端到端延迟，实际延迟还包括 DAW、网络、USB 及手机应用处理。本项目优先考虑连续音频传输，不定位为超低延迟现场监听设备。
+
+### 网络与设备
+
+- 使用 IPv4 UDP，设备监听 `45678` 进行发现与订阅，监听 `45679` 接收电脑音频。
+- 手机音频由设备从 `45679` 单播到 Return 插件登记的临时端口。
+- 每个插件拥有独立的本地端口；每台设备同时支持一个 Send 和一个 Return 实例。
+- 插件按设备身份保存选择，不依赖固定 IP。设备名称为 `LAN MIC-XXXXXX`。
+- 固件和插件共用 SOS v8 协议，线上字段及音频常量以 [common/Protocol.h](common/Protocol.h) 为准。
+
+## 快速使用
+
+### 准备设备
+
+- 一块带原生 USB 和 OPI PSRAM 的 ESP32-S3 开发板；当前固件配置使用 4 MB Flash 和 `qio_opi`。
+- 支持 USB Host / UAC2 音频的手机，以及匹配的数据线或 USB 转接器。面向 Android 和 iPhone 使用，实际可用性取决于手机、转接器及应用的外置音频支持。
+- 一台运行 VST3 宿主 DAW 的 macOS 或 Windows 电脑。
+- 一个支持 2.4 GHz Wi-Fi 的局域网；电脑可以通过有线或无线接入。
+
+手机应连接开发板的**原生 USB 接口**，而不是 USB 转串口接口。
+
+### 连接 Wi-Fi
+
+1. 为设备供电。首次使用或无法连接已保存网络时，设备启动配网热点 `LAN MIC-XXXXXX`。
+2. 用手机或电脑连接该热点，在配网页面选择 Wi-Fi 并填写密码。默认配网页面地址为 `http://192.168.4.1`。
+3. 配网完成后，将电脑接入同一局域网，再把设备的原生 USB 接口连接手机。
+4. 更换网络时，长按 BOOT 键（GPIO0）至少 3 秒，待状态灯快速闪烁后松开，设备会清除 Wi-Fi 凭据并重启。
+
+默认状态灯位于 GPIO18，高电平点亮；连接 Wi-Fi 时快闪，配网时慢闪，联网待机时常亮，USB 音频工作时每秒短闪一次。
+
+### 在 DAW 中使用
+
+1. 安装插件并让 DAW 扫描 VST3。
+2. 在要发送到手机的音轨或总线上插入 **LAN MIC Send**。
+3. 在另一条接收音轨上插入 **LAN MIC Return**，将其输出送到所需监听或录音通道。
+4. 在两个插件的 `Device` 菜单中选择同一台设备，或使用 `Automatic (first discovered device)`。
+5. 开启 `Network enabled`，通过 `Network gain` 调整网络音频电平，范围为 `-60 dB` 到 `+12 dB`。
+6. 在手机应用中使用外置 USB 麦克风和播放设备。
+
+Send 将输入声道平均混合成单声道发送，**不改变 DAW 轨道的原始输出**；其网络增益只影响发送信号。Return **用收到的音频替换轨道输出**，立体声音轨保留左右声道，单声道音轨输出左右平均值。
+
+避免把 Return 音轨再次送入同一设备的 Send 路径，以免形成音频反馈。需要把手机音频纳入工程时，应先实时录制到音轨；插件在宿主标记的离线导出模式下不进行网络音频传输。
+
+## 开发与构建
+
+### ESP32-S3 固件
+
+固件使用 PlatformIO 和 Arduino 框架，项目入口为 [esp32s3/platformio.ini](esp32s3/platformio.ini)。
+
+| 依赖或配置 | 当前版本 |
+| --- | --- |
+| PlatformIO 平台 | pioarduino `53.03.11` |
+| Arduino-ESP32 | `3.1.1` |
+| arduino-audio-tools | 提交 `27547291d4a1514e64d37a97f1ce34636af86bd6` |
+| codec-opus | `v1.6.1` |
+| WiFiManager | `2.0.17` |
+| C++ 标准 | C++17 |
+
+在 VS Code 中用 PlatformIO 打开 `esp32s3/`，选择 `esp32-s3-devkitc-1` 环境进行构建和上传。命令行方式如下，在项目根目录执行：
+
+```sh
+pio run -d esp32s3 -e esp32-s3-devkitc-1
+pio run -d esp32s3 -e esp32-s3-devkitc-1 -t upload
+```
+
+固件按采集、网络和编码分工：
+
+| 任务 | 核心 | 优先级 | 栈 | 职责 |
+| --- | --- | --- | --- | --- |
+| `audioTask` | Core 0 | 4 | 8 KiB | USB 收发、音量处理与 PCM 组帧 |
+| `networkTask` | Core 1 | 3 | 32 KiB | 设备发现、订阅、UDP 收发与上行解码 |
+| `encoderTask` | Core 1 | 2 | 48 KiB | 手机播放音频的立体声 Opus 编码 |
+
+PCM 播放和采集队列位于 PSRAM；编解码器状态及编码任务静态栈位于内部 RAM。设备使用非阻塞 socket 和任务通知传递音频，Opus 采用固定点与 Xtensa 优化。
+
+### VST3 插件
+
+构建入口为 [vst3/CMakeLists.txt](vst3/CMakeLists.txt)，需要 CMake 3.22 或更新版本、C++17 编译器、Git 和 Ninja。CMake 自动获取 JUCE `8.0.6` 和 Opus `v1.6.1`。
+
+- macOS：安装 Xcode Command Line Tools；可构建本机架构或 `arm64;x86_64` Universal 插件。
+- Windows：安装 Visual Studio C++ 构建工具与 Windows SDK，在 x64 开发者命令环境中使用 Ninja。
+- VS Code：使用 CMake Tools，将源码目录设为 `vst3/`，选择所需预设。
+
+在项目根目录构建本机架构的 Release 插件：
+
+```sh
+cmake -S vst3 -B vst3/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build vst3/build --target lan_mic_send_VST3 lan_mic_return_VST3
+```
+
+macOS Universal 预设以 macOS 11.0 为最低部署目标。在 `vst3/` 目录执行：
+
+```sh
+cmake --preset mac-universal
+cmake --build --preset mac-universal
+```
+
+生成的插件名称为 `LAN MIC Send.vst3` 和 `LAN MIC Return.vst3`，位于构建目录下各自的 `lan_mic_*_artefacts/Release/VST3/` 中。
+
+| CMake 选项 | 默认值 | 用途 |
+| --- | --- | --- |
+| `SOS_JUCE_PATH` | 空 | 使用已有的本地 JUCE 源码目录 |
+| `SOS_COPY_VST3_AFTER_BUILD` | `ON` | 构建完成后自动复制到插件目录 |
+| `SOS_VST3_DIR` | 空 | 自定义自动复制的目标目录 |
+
+默认自动复制位置为 macOS 的 `~/Library/Audio/Plug-Ins/VST3` 和 Windows 的 `C:\Program Files\Common Files\VST3`。Windows 系统目录需要写入权限；可指定 `SOS_VST3_DIR`，或用 `-DSOS_COPY_VST3_AFTER_BUILD=OFF` 关闭自动复制。
+
+## 安装与打包
+
+`site/` 提供随仓库分发的 [macOS 安装包](site/LANMIC_0.1.0.pkg) 和 [Windows 安装包](site/LANMIC_Setup_0.1.0.exe)。开发时可从源码构建对应版本；固件与插件需要使用相同的协议版本。
+
+已有构建产物可通过脚本安装。以下命令在项目根目录执行：
+
+```sh
+# macOS：安装到当前用户的插件目录
+bash scripts/install_vst_macos.sh --user vst3/build
+```
+
+```powershell
+# Windows：安装到当前用户的插件目录
+.\scripts\install_vst_windows.ps1 -User .\vst3\build
+```
+
+不带 `--user` 或 `-User` 时，脚本安装到系统插件目录，并按需请求管理员权限。安装会替换目标目录中的同名插件；请先关闭 DAW，完成后重新扫描插件。
+
+制作安装包：
+
+```sh
+# macOS：从指定构建目录生成 pkg
+bash scripts/make_pkg.sh vst3/build-universal
+```
+
+```powershell
+# Windows：需要 Inno Setup 7，兼容 Inno Setup 6.3+
+.\scripts\make_installer.ps1 .\vst3\build
+```
+
+安装包输出到 `dist/`，版本号默认读取 `vst3/CMakeLists.txt`。macOS `.pkg` 安装到 `/Library/Audio/Plug-Ins/VST3`；Windows 安装器支持系统级或当前用户安装。macOS 打包脚本支持通过 `--sign` 指定安装器签名证书。
+
+## 网络使用范围
+
+自动发现要求电脑和设备处于允许广播及设备互访的同一局域网，防火墙需允许 DAW 的 UDP 通信。设备只需接入局域网，不依赖云端服务。
+
+当前协议不提供音频加密或身份认证，会话 ID 仅用于区分设备启动和插件实例。请在可信网络中使用，不要将设备端口映射到公网。配网热点为开放热点，配置时应在可信环境中操作。
 
 ## 目录结构
 
-- `/esp32s3`：ESP32-S3 代码目录
-- `/vst3`：VST3 插件代码目录
-- `/python`：Python 代码目录
-
-## 代码结构
-
-- ESP32-S3：PlatformIO + Arduino framework + arduino-audio-tools
-- VST3：JUCE + CMake
-- Python：3.x + sounddevice + numpy（可选）
-
-## 当前实现
-
-已补齐 Arduino 固件、两个 JUCE VST3 插件、共享协议和 Python 发现工具。
-当前交付为源码，尚未编译、刷机、加载 DAW 或验证手机兼容性。
-
-```text
-DAW -> LAN MIC Send -> Wi-Fi UDP -> ESP32-S3 -> USB IN -> 手机麦克风
-DAW <- LAN MIC Return <- Wi-Fi UDP <- ESP32-S3 <- USB OUT <- 手机播放
-```
-
-- 网络与 USB 固定 48 kHz，VST 自动转换 DAW 工程采样率；上行网络单声道，
-  下行网络真立体声（保留手机左右分离，插件按 L/R 输出），
-  USB PCM16 双通道。
-- 两个方向均使用 20 ms Opus：电脑到 ESP32 为 128 kbps CBR 单声道，
-  ESP32 到电脑为 192 kbps CBR 交错立体声。
-  两个网络接收方向均使用约 300 ms 起播缓冲；
-  小幅速率校正补偿两台设备的时钟差。
-- 独立网络线程、原子同步有界队列（电脑端要求无锁）、短丢包平滑补偿、
-  长缺口和欠载淡出、延迟积累裁剪。
-- 广播发现，单播订阅与音频传输；每个插件使用系统分配的本地端口，不抢占固定电脑端口。
-- 每台 ESP32 同时接受一个发送插件和一个接收插件，两个方向可以独立使用。
-- 插件支持设备选择、增益、启停、状态统计和工程内配置保存。
-- `LAN MIC Return` 声明为可自主产生输出的 VST3 Generator，并在处理器准备和工程状态
-  恢复阶段启动接收租约；无需先打开插件编辑器即可接收手机音频。
-- 固件通过 `arduino-audio-tools` 的 `USBAudioStream` 提供 USB Audio Class 2。
-- 固件省电策略：USB 音频停止 5 秒后重新启用 Wi-Fi modem sleep（`kWifiIdleSleepMs`），
-  音频流恢复时立即关闭以保障传输；流式状态 LED 改为每秒短闪以消除常亮电流；
-  USB 空闲时音频任务降为 200 Hz 轮询，Wi-Fi 未就绪时网络任务降为 20 Hz。
-  空闲状态下发现设备/恢复音频可能多出几十毫秒响应延迟，流式期间行为不变。
-
-“不卡顿、无延迟”是优化目标，不是无线传输保证。现有缓冲本身就会带来延迟，
-实际端到端延迟还包括 DAW 缓冲、Wi-Fi、USB 和手机应用处理，必须测量。
-初始配置更偏向稳定性，不建议用它代替要求极低延迟的有线现场监听。
-
-## 快速开始
-
-### 1. 硬件与网络
-
-1. 当前配置沿用 **ESP32-S3、16 MB Flash、8 MB OPI PSRAM** 的板卡假设；其他型号先调整 `esp32s3/platformio.ini`。
-2. 电脑与 ESP32 接入同一局域网。ESP32 使用 2.4 GHz Wi-Fi，电脑可用有线或同网段 Wi-Fi。
-3. 手机接 ESP32 的原生 USB OTG 接口，不是 USB-UART 下载口。S3 原生 USB 为 GPIO19/D-、GPIO20/D+。
-4. 手机必须充当 USB Host，使用支持数据的 OTG 线或转接器；供电不足时使用合规的有源 USB Hub。
-5. 不要用普通 USB 线把两个 Host 端互接，也不要将两路未经隔离的 5 V 电源并联。
-6. 红色状态 LED 使用 GPIO18，高电平点亮；建议 GPIO18 经 330 Ω～1 kΩ
-   限流电阻连接 LED 正极，LED 负极接 GND。若实物采用低电平点亮，将
-   `kStatusLedActiveHigh` 改为 `false`。
-
-### 2. 固件
-
-固件使用手机网页配网，不再读取或编译 `WifiConfig.h`：
-
-1. 首次启动、没有已保存凭据或连接失败时，ESP32 创建名为
-   `LAN MIC-<设备编号>` 的开放热点，无需密码。
-2. 手机连接该热点后使用自动弹出的配网页面选择 2.4 GHz Wi-Fi 并输入密码；
-   未自动弹出时访问 `http://192.168.4.1`。
-   配网页面使用 `LAN MIC` 白色主题，直接进入 Wi-Fi 扫描和密码输入，
-   不显示首页菜单、返回、退出、ESP 芯片信息、固件更新或网页清除按钮。
-3. 未连接 Wi-Fi 时，设备会一直保持配网热点和页面，不再自动超时。
-   配置成功后凭据保存到 ESP32 NVS，后续启动自动连接。
-4. 需要更换网络时，在固件正常运行后长按开发板 **BOOT** 键约 3 秒，
-   看到提示后松开。设备会清除已保存凭据并重启进入配网；不要按住 BOOT
-   键执行硬复位，否则芯片会进入下载模式。
-
-GPIO18 状态灯含义：
-
-- 快闪（约 125 ms 翻转）：正在连接 Wi-Fi。
-- 慢闪（约 500 ms 翻转）：开放配网热点，等待配置。
-- 常亮：Wi-Fi 已连接，等待音频。
-- 每秒短闪一次（亮约 100 ms）：USB 音频正在传输。
-- 极快闪：BOOT 已长按 3 秒，可以松开并清除凭据。
-- 每秒双闪：USB 初始化或 FreeRTOS 任务创建失败。
-
-配网热点仅在需要配置时出现。由于热点不设密码，不要在不可信场所长时间停留在
-配网模式；正式部署时还应考虑启用 Flash Encryption 保护 NVS 凭据。
-
-使用 VS Code 的 PlatformIO 扩展打开 `esp32s3`，环境为 `esp32-s3-devkitc-1`。
-以下命令由开发者按需执行，本次未执行：
-
-```sh
-pio run -d esp32s3
-pio run -d esp32s3 -t upload
-pio device monitor -d esp32s3 -b 115200
-```
-
-当前 `platform = espressif32` 使用本机安装的平台；本次编译日志为平台 55.3.312、
-Arduino 3.3.12、ESP-IDF 5.5.5。音频库固定为
-`arduino-audio-tools@27547291d4a1514e64d37a97f1ce34636af86bd6`。
-下行压缩库固定为 `codec-opus@v1.6.1`。编码器状态当前显式放在内部 RAM，
-需关注剩余连续块和 Wi-Fi/lwIP 可用堆空间。
-Wi-Fi 网页配网固定使用 `WiFiManager@2.0.17`。
-平台未锁定版本，其他机器的解析结果可能不同，应核对构建日志。
-首次构建需要下载依赖。Arduino 3.3.12 使用原生 `AUDIO` 接口槽；
-较早的 Arduino 2/3 版本保留 `CUSTOM` 接口槽适配。
-音频库自带类驱动，因此**不要额外启用 `CFG_TUD_AUDIO` 或原生 USB CDC**。
-USB IN 使用库的包长控制，在 48 kHz 下每 1 ms 发送 192 字节；描述符仍保留
-196 字节最大包容量，不能将最大容量误当作固定有效包长。
-升级框架或音频库之前，需要重新检查这层适配，不能直接替换成任意版本。
-
-ESP32 工具链可能报告 `std::atomic<uint32_t>::is_always_lock_free == false`。
-固件允许 SDK 提供的原子操作后备实现，仍保留 acquire/release 内存序；
-不以普通变量或 `volatile` 替代。电脑插件仍强制检查游标原子操作无锁。
-
-串口日志走 USB-UART 下载口或 UART0，115200 波特率；原生 USB 已专用于音频。
-启动后日志打印设备身份和 DHCP 地址；未配置 Wi-Fi 时 USB 仍可枚举，但网络不工作。
-USB 音频停止期间每 5 秒输出流状态、收发数、欠载和队列丢帧统计；
-音频活跃时只累计指标，不执行长串口输出，停止后立即打印汇总。
-
-### 3. VST3 插件
-
-依赖 CMake 3.22+、Ninja、C++17 编译器。默认固定 JUCE 8.0.6，并通过 CMake
-获取官方 Xiph Opus 1.6.1；首次配置需要联网。
-macOS 使用 Xcode Command Line Tools；Windows 使用 Visual Studio 2022 C++ 工具链。
-Windows 上应从 VS 开发者环境启动 VS Code，或通过 CMake Tools 选择 MSVC 工具链。
-
-VS Code 的 CMake Tools 源码目录选择 `vst3`，配置预设选 `release`；
-macOS 同时支持 Intel/Apple Silicon 的产物选择 `mac-universal`。
-也可以在 `vst3` 目录执行：
-
-```sh
-cmake --preset release
-cmake --build --preset release
-```
-
-已有 JUCE 源码时，可在配置时加 `-DSOS_JUCE_PATH=/path/to/JUCE`，建议仍使用 8.0.6。
-产物分别位于：
-
-```text
-vst3/build/lan_mic_send_artefacts/Release/VST3/LAN MIC Send.vst3
-vst3/build/lan_mic_return_artefacts/Release/VST3/LAN MIC Return.vst3
-```
-
-构建成功后，两个 bundle 会自动复制到 DAW 的插件搜索目录：
-
-- macOS：`~/Library/Audio/Plug-Ins/VST3`
-- Windows：`C:\Program Files\Common Files\VST3`
-
-这一步由 JUCE 的 `COPY_PLUGIN_AFTER_BUILD` 完成，目标目录不存在时会由 CMake 创建，
-无需手动拷贝。随后在 Studio One 重新扫描插件即可看到 `LAN MIC Send` 和
-`LAN MIC Return`。
-
-注意事项：
-
-- 自动安装默认开启。只想保留构建产物时用 `-DSOS_COPY_VST3_AFTER_BUILD=OFF` 关闭。
-- Windows 公共插件目录通常需要管理员权限，复制失败时以管理员身份构建；
-  或改用自定义目录：`cmake --preset release -DSOS_VST3_DIR="D:/VST3"`。
-  自定义目录同样会替换 macOS 的默认位置。
-- 覆盖已被 DAW 加载的 bundle 可能失败。构建前先在 Studio One 中关闭工程或卸载插件。
-- 首次改用新名称时，手动删除插件目录中遗留的旧版 bundle，避免 Studio One
-  同时显示新旧插件。Windows 还需要在 Studio One 中重新扫描插件；新插件使用
-  独立的 VST3 Class ID，不会与历史缓存中的插件类冲突。
-- 两个 bundle 的路径固定为
-  `vst3/build/lan_mic_send_artefacts/Release/VST3/LAN MIC Send.vst3` 与
-  `vst3/build/lan_mic_return_artefacts/Release/VST3/LAN MIC Return.vst3`，也可手动拷贝。
-- Windows 自动发现会为每个有效 IPv4 地址绑定独立 UDP socket，避免广播被 VPN、
-  虚拟网卡或错误的默认路由截走。搜索状态中的数字是成功绑定的接口数量。
-- Windows 网络应设为“专用”，并允许 Studio One 在专用网络通过 Windows Defender
-  防火墙收发 UDP。显示 `Searching on 0 IPv4 interface(s)` 时先检查本机 IPv4 网卡；
-  数字大于零但仍无设备时检查防火墙、AP 客户端隔离以及电脑与 ESP32 是否同网段。
-
-### 4. Studio One 路由
-
-1. DAW 工程可使用 44.1、48、88.2、96 kHz 等采样率。`LAN MIC Send` 自动转换到
-   网络 48 kHz，`LAN MIC Return` 自动从网络 48 kHz 转回工程采样率。
-   DAW 向插件提供浮点音频，工程位深无需设为 16-bit；网络边界始终量化为 PCM16。
-2. 在要发给手机的音轨或总线上插入 `LAN MIC Send`。插件始终保留本地原始声音，
-   `Network gain` 只调整发送到手机的音量。
-3. 在独立的、启用监听且持续处理的音轨或总线上插入 `LAN MIC Return`。它用手机回传声音替换输入，
-   不与输入混音，也不需要先打开插件编辑器来启动网络。
-4. 两个插件选择同一台设备。默认各自选择最先发现的设备；多设备环境应显式选择相同设备身份。
-5. 手机上选择外置 USB 麦克风/耳麦，并在目标应用内授权录音或选择输入输出。
-6. 不要将 `LAN MIC Return` 的返回总线重新送进 `LAN MIC Send`，除非明确需要环回，否则可能产生啸叫。
-
-设备被占用时，停止另一实例的网络功能或关闭实例，等待约 3.5 秒租约释放。
-DAW 离线导出时网络音频禁用；需要导出的手机声音应先实时录制为音频文件。
-接收插件旁路输出静音，发送插件旁路保留原始输入；恢复需要重新续约和缓冲。
-
-### 5. 可选发现工具
-
-无需安装 Python 音频依赖，也不会占用收发租约：
-
-```sh
-python3 python/discover.py
-python3 python/discover.py --seconds 5 --broadcast 192.168.1.255
-```
-
-第二条中的广播地址仅为示例，实际应按子网填写，**不是配置 ESP32 固定 IP**。
-当前 Python 目录只提供发现诊断，音频收发由两个插件承担；
-`sounddevice`、`numpy` 不是本实现运行的必需依赖。
-
-## 兼容性与限制
-
-- 面向 Android USB Host 和支持 USB Audio 的 iPhone。USB-C iPhone 使用合适的数据连接；Lightning iPhone 通常需要支持供电的相机转接器。
-- 固件提供 **UAC2**，不是 UAC1。不同 Android 系统、iOS 版本、转接器和应用对双通道 USB 麦克风的支持不同，当前没有实测通过的机型清单。
-- 系统枚举成功不代表所有通话、直播或录音应用都会采用该输入；应用可能强制使用内置麦克风或单声道。
-- iOS 发出的 UAC2 播放音量/静音请求会在 USB OUT 进入网络编码前以平滑增益处理，
-  并按 UAC 分贝刻度转换为听感均匀的振幅，因而控制手机返回 DAW 的声音。
-  `Network gain` 只控制 DAW 发往手机麦克风的方向。
-  部分 Android 设备不会发送 UAC Feature Unit 请求，其音量行为由系统或应用决定。
-- 仅可信局域网使用：发现、控制和 Opus 音频均为未认证、未加密 UDP。不要映射端口到公网。
-- 关闭 AP 客户端隔离；允许 DAW 的本地网络访问及防火墙 UDP 通信。VPN、多网卡或访客网络可能影响广播。
-- USB VID/PID 沿用音频库的开发默认值，不代表拥有商业产品 USB 标识授权。
-- 分发前确认 JUCE、音频库及相关依赖的许可证义务。
-
-更多细节见 [网络协议](docs/PROTOCOL.md) 和 [人工验收清单](docs/VALIDATION.md)。
+| 目录或文件 | 内容 |
+| --- | --- |
+| [common/](common/) | 两端共用的协议、SPSC 队列与弹性播放缓冲 |
+| [esp32s3/](esp32s3/) | PlatformIO 固件工程 |
+| [esp32s3/src/main.cpp](esp32s3/src/main.cpp) | USB 音频、配网与各任务实现 |
+| [esp32s3/src/NonBlockingUdp.h](esp32s3/src/NonBlockingUdp.h) | 非阻塞 UDP 封装 |
+| [vst3/](vst3/) | JUCE Send / Return 插件与 CMake 预设 |
+| [scripts/](scripts/) | macOS、Windows 插件安装及打包脚本 |
+| [docs/](docs/) | 网络协议说明 |
+| [site/](site/) | 产品展示页面、图片及发行安装包 |

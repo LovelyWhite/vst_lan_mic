@@ -10,7 +10,7 @@ public:
 private:
     void timerCallback() override;
     BridgeProcessor& processor_;
-    juce::Label title_, direction_, deviceLabel_, gainLabel_, status_;
+    juce::Label title_, direction_, deviceLabel_, gainLabel_, status_, diagnostics_;
     juce::ComboBox device_;
     juce::Slider gain_;
     juce::ToggleButton enabled_{"Network enabled"};

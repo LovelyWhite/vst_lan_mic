@@ -27,6 +27,13 @@ public:
         write_.store(w + count, std::memory_order_release);
         return true;
     }
+    // Consumer-only preview; the producer cannot reuse this slot until discard/pop.
+    bool peek(T& result) const {
+        const auto r = read_.load(std::memory_order_relaxed);
+        if (r == write_.load(std::memory_order_acquire)) return false;
+        result = data_[r & (Capacity - 1)];
+        return true;
+    }
     bool pop(T& result) {
         const auto r = read_.load(std::memory_order_relaxed);
         if (r == write_.load(std::memory_order_acquire)) return false;
@@ -67,8 +74,9 @@ public:
     static constexpr uint32_t targetMs = 300;
     static constexpr float maxRateCorrection = 0.002f;
 #else
-    static constexpr size_t frameCapacity = 32768;
-    static constexpr uint32_t targetMs = 300;
+    // Favor duplex monitoring stability; leave room above target for receive bursts.
+    static constexpr size_t frameCapacity = 65536;
+    static constexpr uint32_t targetMs = 500;
     static constexpr float maxRateCorrection = 0.002f;
 #endif
     // Queue lengths are in interleaved samples; targets stay in milliseconds
@@ -102,11 +110,16 @@ public:
     }
     void prepare() {
         const auto size = queue.size();
-        if (size > target + trimMargin) {
-            queue.discard(size - target);
+        const auto overflowCount = overflows.load(std::memory_order_relaxed);
+        if (size > target &&
+            (size > target + trimMargin || overflowCount != handledOverflows_)) {
+            // Only the consumer trims; retain a priming buffer after producer overflow.
+            const auto discard = (size - target) / Channels * Channels;
+            queue.discard(discard);
             primed_ = false;
             ++trims;
         }
+        handledOverflows_ = overflowCount;
         const float correction = std::max(-maxRateCorrection,
             std::min(maxRateCorrection,
                 (float(queue.size()) - float(target)) * 0.000002f));
@@ -135,12 +148,14 @@ public:
             phase_ = 0;
             primed_ = true;
             fade_ = 0;
+            for (int ch = 0; ch < Channels; ++ch) fadeFrom_[ch] = previous_[ch];
         }
         for (int ch = 0; ch < Channels; ++ch)
             out[ch] = (float(a_[ch]) + (float(b_[ch]) - float(a_[ch])) * phase_) /
                       32768.0f;
         fade_ = std::min(1.0f, fade_ + 1.0f / 96.0f);
-        for (int ch = 0; ch < Channels; ++ch) out[ch] *= fade_;
+        for (int ch = 0; ch < Channels; ++ch)
+            out[ch] = fadeFrom_[ch] * (1.0f - fade_) + out[ch] * fade_;
         phase_ += ratio_;
         while (phase_ >= 1.0f) {
             phase_ -= 1.0f;
@@ -162,7 +177,8 @@ private:
     bool primed_ = false;
     int16_t a_[Channels] = {}, b_[Channels] = {};
     float phase_ = 0, nominalRatio_ = 1, ratio_ = 1;
-    float previous_[Channels] = {}, fade_ = 0;
+    float previous_[Channels] = {}, fadeFrom_[Channels] = {}, fade_ = 0;
+    uint32_t handledOverflows_ = 0;
 };
 using MonoPlayout = Playout<1>;
 using StereoPlayout = Playout<2>;

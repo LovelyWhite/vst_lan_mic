@@ -3,11 +3,16 @@
 #include <WiFiManager.h>
 #include <esp_arduino_version.h>
 #include <esp_heap_caps.h>
+#include <esp_memory_utils.h>
 #include <esp_system.h>
 #include <esp_timer.h>
 #include <esp32-hal-tinyusb.h>
+#include <freertos/idf_additions.h>
+#include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <new>
 #include <opus.h>
 
 // Audio Tools supplies its own class driver. Older cores use the CUSTOM slot;
@@ -25,10 +30,15 @@
 #include "AudioBuffer.h"
 #include "NonBlockingUdp.h"
 
+#if CONFIG_IDF_TARGET_ESP32S3 && ESP_ARDUINO_VERSION == ESP_ARDUINO_VERSION_VAL(3, 1, 1)
+#include <soc/usb_reg.h>
+#include <soc/usb_struct.h>
+#endif
+
 // ---- Output control macros -------------------------------------------------
 // Define LANMIC_ENABLE_SERIAL to enable all Serial output.
 // Undefine or comment out for silent builds (e.g. field deployments).
-// #define LANMIC_ENABLE_SERIAL
+#define LANMIC_ENABLE_SERIAL
 
 #ifdef LANMIC_ENABLE_SERIAL
   #define S_INIT()               Serial.begin(115200)
@@ -63,13 +73,49 @@ constexpr bool kStatusLedActiveHigh = true;
 // decoder instead of padding with noise.
 constexpr uint32_t kMaxPlcFrames = 300 / sos::kOpusFrameDurationMs;
 
+constexpr uint32_t plcFramesForGap(uint32_t gap) {
+    return gap <= kMaxPlcFrames ? gap : 0;
+}
+static_assert(plcFramesForGap(0) == 0 && plcFramesForGap(1) == 1,
+              "Only missing frames need PLC");
+static_assert(plcFramesForGap(kMaxPlcFrames) == kMaxPlcFrames &&
+              plcFramesForGap(kMaxPlcFrames + 1) == 0 &&
+              plcFramesForGap(0x7fffffffu) == 0,
+              "Long gaps must reset without a PLC burst");
+
+#if CONFIG_IDF_TARGET_ESP32S3 && ESP_ARDUINO_VERSION == ESP_ARDUINO_VERSION_VAL(3, 1, 1)
+class UsbAudioBackend : public audio_tools::USBAudioBackendTinyUSB {
+    bool isoActivateEndpoint(
+        uint8_t rhport, const audio_tools::UsbEndpointDescriptorView& ep) override {
+        const bool isIn = ep.direction() == audio_tools::UsbDir::In;
+        const uint8_t number = ep.bEndpointAddress & 0x0f;
+        if (isIn && (rhport != 0 || number == 0 || number > 4)) return false;
+        if (!USBAudioBackendTinyUSB::isoActivateEndpoint(rhport, ep)) return false;
+        if (isIn) {
+            // shortcut: Arduino 3.1.1 increments TXFNUM on each activation; review when upgrading its DCD.
+            // dfifo_alloc() and handle_epin_slave() instead address the FIFO by endpoint number.
+            auto& ctl = USB0.in_ep_reg[number].diepctl;
+            ctl = (ctl & ~USB_D_TXFNUM1_M) | (uint32_t(number) << USB_D_TXFNUM1_S);
+            assert(((ctl & USB_D_TXFNUM1_M) >> USB_D_TXFNUM1_S) == number);
+            assert((USB0.dieptxf[number - 1] >> 16) * 4 >= ep.packetSize());
+        }
+        return true;
+    }
+};
+
+class UsbAudioStream : public audio_tools::USBAudioStream {
+    UsbAudioBackend backend_;
+    audio_tools::USBAudioBackend& backend() override { return backend_; }
+};
+UsbAudioStream usb;
+#else
 audio_tools::USBAudioStream usb;
+#endif
 constexpr uint32_t kUsbUnityGainQ16 = 65536;
 std::atomic<uint32_t> usbSpeakerLeftGainQ16{kUsbUnityGainQ16};
 std::atomic<uint32_t> usbSpeakerRightGainQ16{kUsbUnityGainQ16};
 std::atomic<uint32_t> usbSpeakerLeftMuted{0};
 std::atomic<uint32_t> usbSpeakerRightMuted{0};
-sos::MonoPlayout microphone; // Uplink (DAW -> phone) stays mono.
 struct CapturedFrame {
     alignas(4) sos::OpusFrame pcm{};
     uint32_t capturedMs = 0, sequence = 0;
@@ -77,9 +123,14 @@ struct CapturedFrame {
 struct EncodedFrame {
     std::array<uint8_t, sos::kOpusMaxBytes> payload{};
     uint32_t capturedMs = 0, sequence = 0;
+    uint32_t encodedMs = 0; // Local timing only; not part of the wire header.
     uint16_t payloadBytes = 0;
 };
-sos::SpscRing<CapturedFrame, 8> captured;
+struct AudioQueues {
+    sos::MonoPlayout microphone; // Uplink (DAW -> phone) stays mono.
+    sos::SpscRing<CapturedFrame, 8> captured;
+};
+AudioQueues* audioQueues = nullptr; // PSRAM, initialized before any audio task starts.
 // Encoder task is the only producer, networkTask is the only consumer.
 sos::SpscRing<EncodedFrame, 16> encodedDownlink;
 std::atomic<uint32_t> uplinkEpoch{0}, lastUplinkMs{0};
@@ -126,6 +177,14 @@ struct DebugStats {
     std::atomic<uint32_t> plcFrames{0}, uplinkResets{0};
     // UDP 发送失败次数（control 应答 + audio 下行两路，累计）。
     std::atomic<uint32_t> udpEndPacketFail{0};
+    // Actual downlink sendto calls returning WouldBlock, not select snapshots.
+    std::atomic<uint32_t> downlinkSendWouldBlock{0};
+    // Device -> DAW pipeline: cumulative counts and window timing maxima.
+    std::atomic<uint32_t> capturedFrames{0}, encodedFrames{0}, sentFrames{0};
+    std::atomic<uint32_t> encodeErrors{0}, downlinkPollBlocked{0};
+    std::atomic<int32_t> lastEncodeError{0};
+    std::atomic<uint32_t> captureGapMaxMs{0}, encodeGapMaxMs{0}, sendGapMaxMs{0};
+    std::atomic<uint32_t> encodeWaitMaxMs{0}, sendWaitMaxMs{0}, sendAgeMaxMs{0};
     // 最近一次 sendto hard error 的 errno（0=尚无）。
     std::atomic<int32_t> controlSendErrno{0}, downlinkSendErrno{0};
     // socket 重建原因细分（累计）。
@@ -139,6 +198,10 @@ struct DebugStats {
 };
 DebugStats stats; // 唯一统计块：热任务只写 relaxed 原子，loop 任务 1 Hz 读取。
 TaskHandle_t audioTaskHandle = nullptr, encoderTaskHandle = nullptr, networkTaskHandle = nullptr; // 供 1 Hz 栈高水位查询
+// Reserve internal RAM before heap fragmentation; Opus scratch is hot, PCM queues are not.
+alignas(portBYTE_ALIGNMENT) StackType_t encoderTaskStack[49152 / sizeof(StackType_t)];
+StaticTask_t encoderTaskControl;
+static_assert(sizeof(encoderTaskStack) == 49152, "Keep the measured encoder stack budget");
 
 // Publish a window max/min via CAS so a better sample landing between the
 // reporter's read and reset can never be clobbered by a stale value.
@@ -252,15 +315,8 @@ struct Peer {
 // hot loops.
 constexpr int64_t kTickUs = 1000000 / int64_t(configTICK_RATE_HZ);
 
-// Fixed-period pacing for the hot loops. Deadlines are tracked in the
-// esp_timer refclock (monotonic microseconds) rather than with relative
-// vTaskDelay calls, whose period degrades to "one tick plus loop work" and
-// accumulates drift. Each wait converts the refclock deadline to an absolute
-// tick index and sleeps via xTaskDelayUntil, so loop work can neither stretch
-// the period nor phase-shift it; being tick-anchored it also cannot undersleep
-// and start spinning. An overrun (or one of the mid-loop backoff sleeps)
-// re-anchors the schedule to now instead of bursting one catch-up pass per
-// missed deadline.
+// Tick-anchored pacing avoids adding loop work to every relative delay;
+// overruns re-anchor rather than replaying every missed deadline.
 struct Pacer {
   TickType_t periodTicks;
   TickType_t nextTick;
@@ -297,10 +353,10 @@ struct Pacer {
   }
 
   // 睡到下一个轮询截止期，但可被任务通知提前唤醒（用于 networkTask：
-  // audioTask 每入队一帧下行数据就通知一次）。返回 true=被通知提前唤醒
+  // encoderTask 每入队一帧下行数据就通知一次）。返回 true=被通知唤醒
   // （消费侧据此区分「竞态空队列」与正常空探测），false=睡到截止期。
   // 注意：任务通知是唤醒信号而非信号量——清零式取走不保证逐通知消费，
-  // 消费侧必须把队列排空（见 networkTask 的下行发送循环）。
+  // 未发送的数据由下一次通知或轮询继续处理。
   // 网格语义：进入时 now ∈ [nextTick, nextTick+period) 本轮有效，睡
   // period-diff 到下一网格点；通知提前唤醒则以事件为准重锚网格（事件
   // 驱动优先，轮询网格只是兜底）。overrun 只统计错过一个完整轮询周期
@@ -321,7 +377,7 @@ struct Pacer {
         // 新帧提前唤醒：事件时刻即新网格锚点（不 ++overrun——这是提前
         // 而非超期；重锚后下一轮 diff≈0，睡满一个兜底周期）。
         ++anchor;
-        nextTick = now;
+        nextTick = xTaskGetTickCount();
         return true;
       }
       // 睡到网格点：本轮消耗掉该时段，网格前移一个周期
@@ -337,6 +393,8 @@ struct Pacer {
 };
 
 void audioTask(void*) {
+    auto& microphone = audioQueues->microphone;
+    auto& captured = audioQueues->captured;
     Pacer pacer{1000};
     uint32_t epoch = uplinkEpoch.load();
     bool txWasActive = false, rxWasActive = false, uplinkWasFresh = false;
@@ -344,6 +402,7 @@ void audioTask(void*) {
     static CapturedFrame frame;
     size_t frameUsed = 0;
     uint32_t captureSequence = 0;
+    uint32_t lastCapturedMs = millis();
     uint32_t lastStreamActiveMs = 0;
     bool wifiModemSleeping = true; // IDF default while associated.
     std::array<uint8_t, 192> speakerBytes{};
@@ -451,6 +510,7 @@ void audioTask(void*) {
 
         if (rxActive != rxWasActive) {
             frameUsed = 0;
+            lastCapturedMs = millis();
             // Only this task consumes bufferRx().
             while (usb.available() > 0)
                 usb.readBytes(speakerBytes.data(), speakerBytes.size());
@@ -484,6 +544,9 @@ void audioTask(void*) {
                 frame.pcm[frameUsed++] = int16_t(scaledRight);
                 if (frameUsed == frame.pcm.size()) {
                     frame.capturedMs = millis();
+                    statsMax(stats.captureGapMaxMs, uint32_t(frame.capturedMs - lastCapturedMs));
+                    lastCapturedMs = frame.capturedMs;
+                    ++stats.capturedFrames;
                     frame.sequence = captureSequence++;
                     if (!downlinkReceiverActive.load(std::memory_order_acquire)) {
                         // 没有手机接收端时不积压原始 PCM，避免恢复后发送旧音频。
@@ -514,11 +577,13 @@ void audioTask(void*) {
 }
 
 void encoderTask(void*) {
+    auto& captured = audioQueues->captured;
     // Keep the large frame buffers off the task stack; Opus encode itself
     // still needs stack headroom for its internal scratch work.
     static CapturedFrame input;
     static EncodedFrame output;
     uint32_t epoch = downlinkEpoch.load(std::memory_order_acquire);
+    uint32_t lastEncodedMs = millis();
 
     const int opusEncoderBytes = opus_encoder_get_size(sos::kOpusChannels);
     // Keep the complete encoder state in internal RAM; do not fall back to PSRAM.
@@ -552,6 +617,7 @@ void encoderTask(void*) {
             epoch = nextEpoch;
             captured.clear();
             opus_encoder_ctl(opusEncoder, OPUS_RESET_STATE);
+            lastEncodedMs = millis();
         }
 
         const uint32_t backlog = captured.size();
@@ -566,14 +632,23 @@ void encoderTask(void*) {
             continue;
         }
 
+        statsMax(stats.encodeWaitMaxMs, uint32_t(millis() - input.capturedMs));
         const int64_t encodeStartUs = esp_timer_get_time();
         const int encoded = opus_encode(
             opusEncoder, input.pcm.data(), int(sos::kOpusFrameSamples),
             output.payload.data(), int(output.payload.size()));
         statsMax(stats.netEncodeMaxUs,
                  uint32_t(esp_timer_get_time() - encodeStartUs));
-        if (encoded <= 0) continue;
+        if (encoded <= 0) {
+            ++stats.encodeErrors;
+            stats.lastEncodeError.store(encoded, std::memory_order_relaxed);
+            continue;
+        }
 
+        output.encodedMs = millis();
+        statsMax(stats.encodeGapMaxMs, uint32_t(output.encodedMs - lastEncodedMs));
+        lastEncodedMs = output.encodedMs;
+        ++stats.encodedFrames;
         output.capturedMs = input.capturedMs;
         output.sequence = input.sequence;
         output.payloadBytes = uint16_t(encoded);
@@ -588,6 +663,7 @@ void encoderTask(void*) {
 }
 
 void networkTask(void*) {
+    auto& microphone = audioQueues->microphone;
     // Socket 轮询节拍（发现保活 + 上行接收 + 租约检查）。下行发送不依赖
     // 该节拍：由 encoderTask 的入队通知驱动（见 waitNotify）。无 socket 时
     // 降为 50 ms（重连本身是定时器驱动）。5 ms 轮询对 20 ms 的上行帧周期
@@ -601,6 +677,7 @@ void networkTask(void*) {
     uint32_t lastRetry = 0, lastValidAudio = 0;
     uint32_t nextDownlinkAttemptMs = 0;
     uint32_t downlinkBackoffMs = 10;
+    uint32_t lastSentMs = millis();
     bool socketsReady = false;
     bool notified = false; // 上一轮 waitNotify 是被入队通知唤醒的（供消费块区分竞态空队列）
     EncodedFrame pendingDownlink;
@@ -610,8 +687,7 @@ void networkTask(void*) {
 
     // Uplink decoder mirrors the plugin's mono 20 ms encoder profile; like the
     // encoder it stays in internal RAM.
-    sos::Frame decoded{};
-    alignas(4) static int16_t decodePcm[sos::kOpusFrameSamples]{};
+    alignas(4) static sos::Frame decoded{};
     const int opusDecoderBytes = opus_decoder_get_size(sos::kUplinkChannels);
     void* opusDecoderMemory = opusDecoderBytes > 0
         ? heap_caps_malloc(size_t(opusDecoderBytes), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
@@ -627,12 +703,8 @@ void networkTask(void*) {
         for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
     }
     auto decodeIntoFrame = [&](const uint8_t* payload, int payloadBytes) {
-        const int samples = opus_decode(opusDecoder, payload, payloadBytes,
-                                        decodePcm,
-                                        int(sos::kOpusFrameSamples), 0);
-        if (samples == int(sos::kOpusFrameSamples))
-            memcpy(decoded.data(), decodePcm, sizeof(decodePcm));
-        return samples;
+        return opus_decode(opusDecoder, payload, payloadBytes, decoded.data(),
+                           int(sos::kOpusFrameSamples), 0);
     };
     auto resetUplink = [&] {
         uplinkSequenceValid = false;
@@ -804,18 +876,20 @@ void networkTask(void*) {
                     if (gap >= 0x80000000u) continue; // Duplicate or late packet.
                 }
                 if (gap > kMaxPlcFrames) {
-                    ++stats.uplinkResets;
-                    opus_decoder_ctl(opusDecoder, OPUS_RESET_STATE);
+                    resetUplink();
+                    // Only the audio consumer may clear and re-prime playout.
+                    ++uplinkEpoch;
                 }
                 bool decodeOk = true;
-                const uint32_t plcFrames = std::min(gap, kMaxPlcFrames);
-                stats.plcFrames.fetch_add(plcFrames, std::memory_order_relaxed);
+                const uint32_t plcFrames = plcFramesForGap(gap);
+                // shortcut: up to 15 PLC frames still run in one pass; split across loops if measured stalls persist.
                 for (uint32_t i = 0; i < plcFrames; ++i) {
                     const int samples = decodeIntoFrame(nullptr, 0);
                     if (samples != int(sos::kOpusFrameSamples)) {
                         decodeOk = false;
                         break;
                     }
+                    stats.plcFrames.fetch_add(1, std::memory_order_relaxed);
                     microphone.push(decoded);
                 }
                 const int samples = decodeOk
@@ -839,9 +913,9 @@ void networkTask(void*) {
         // Keep every produced frame and catch up at 4 ms per packet against a
         // 20 ms production period: the phone playout buffer absorbs the burst
         // with no audible hole, while dropping to the newest frame punched a
-        // 20 ms gap into the stream for every scheduler hiccup. On real
-        // congestion (sendto fails) drop the frame -- retransmitting into
-        // a congested queue amplifies the loss.
+        // 20 ms gap into the stream for every scheduler hiccup. WouldBlock
+        // retains the head frame for bounded-backoff retry; backlog trimming
+        // still bounds queued latency if congestion persists.
         // 下行为事件驱动：encoderTask 每入队一帧即以任务通知唤醒本任务
         //（另有 5 ms 轮询兜底）。通知只是唤醒信号而非信号量——清零式
         // 取走不保证逐通知消费，唤醒后最多发送少量已编码帧，避免 sendto
@@ -857,6 +931,7 @@ void networkTask(void*) {
             ulTaskNotifyTake(pdTRUE, 0); // 丢帧后清掉残留通知，避免一次空唤醒
             nextDownlinkAttemptMs = attemptNow;
             downlinkBackoffMs = 10;
+            lastSentMs = attemptNow;
         } else if (notified && encodedDownlink.size() == 0) {
             ++stats.queuePopFail;
         } else {
@@ -870,12 +945,13 @@ void networkTask(void*) {
                 const uint32_t sendNow = millis();
                 if (int32_t(sendNow - nextDownlinkAttemptMs) < 0) break;
                 if (!audioReady.write) {
+                    if (encodedDownlink.size() != 0) ++stats.downlinkPollBlocked;
                     nextDownlinkAttemptMs = sendNow + downlinkBackoffMs;
                     downlinkBackoffMs =
                         std::min(downlinkBackoffMs * 2, uint32_t(100));
                     break;
                 }
-                if (!encodedDownlink.pop(pendingDownlink)) break; // 队列已排空
+                if (!encodedDownlink.peek(pendingDownlink)) break; // 队列已排空
                 sos::Header h{sos::Kind::AudioOpus, 0, bootSession,
                               pendingDownlink.sequence, pendingDownlink.capturedMs,
                               pendingDownlink.payloadBytes};
@@ -889,6 +965,13 @@ void networkTask(void*) {
                 statsMax(stats.netSendMaxUs,
                          uint32_t(esp_timer_get_time() - downlinkStepUs));
                 if (sent == NonBlockingUdp::SendResult::Sent) {
+                    const uint32_t sentMs = millis();
+                    statsMax(stats.sendGapMaxMs, uint32_t(sentMs - lastSentMs));
+                    statsMax(stats.sendWaitMaxMs, uint32_t(sentMs - pendingDownlink.encodedMs));
+                    statsMax(stats.sendAgeMaxMs, uint32_t(sentMs - pendingDownlink.capturedMs));
+                    lastSentMs = sentMs;
+                    ++stats.sentFrames;
+                    encodedDownlink.discard(1);
                     downlinkBackoffMs = 10;
                     nextDownlinkAttemptMs = sendNow + 4;
                 } else {
@@ -902,11 +985,13 @@ void networkTask(void*) {
                         ++downlinkEpoch;
                         encodedDownlink.clear();
                         if (encoderTaskHandle) xTaskNotifyGive(encoderTaskHandle);
+                    } else {
+                        ++stats.downlinkSendWouldBlock;
                     }
                     nextDownlinkAttemptMs = sendNow + downlinkBackoffMs;
                     downlinkBackoffMs =
                         std::min(downlinkBackoffMs * 2, uint32_t(100));
-                    if (sent == NonBlockingUdp::SendResult::Error) break;
+                    break;
                 }
             }
         }
@@ -926,19 +1011,43 @@ void networkTask(void*) {
     }
 }
 
-// 1 Hz 统计行。运行在 Arduino loop 任务（优先级 1，core 1），低于两个热任务，
-// 因此一行的 UART 发送时间（~15 ms）和 Wi-Fi/RSSI 查询永远不会抢占音频或网络
-// 调度。这是唯一的统计输出；没有任何逐帧打印。
+// 1 Hz statistics on the low-priority Arduino loop task; no per-frame prints.
+// UART wire time exceeds 100 ms at 115200 baud; lower priority does not remove
+// shared driver/heap overhead. Stack and heap scans run once every 5 seconds.
 // 字段名直接嵌在每行里（name=value），无需单独表头。各字段含义/单位：
 // t_ms=毫秒；*_ovr/*_anch/*_fail/*_frames/*_rst/*_tog=自启动累计次数
 // （n_ovr 仅统计错过一个完整轮询周期、n_anch 另含通知事件重锚，与 a_* 口径不同，见 waitNotify）；
-// *_loop_max_us/n_*_us=微秒；usb_tx_xfer=每秒 ISO-IN 完成次数增量；usb_fifo_*=可写字节（-1=未采样）；
-// rssi_dbm=dBm（未连接 -128）；*_stack_min_b=任务栈最小剩余字节（0=任务未创建）。
+// *_loop_max_us/n_*_us=微秒；usb_tx_xfer=窗口内 ISO-IN 完成次数增量；stats_window_ms=实际统计间隔；
+// usb_fifo_*=可写字节（-1=未采样）；
+// rssi_dbm=dBm（未连接 -128）；*_stack_min_b=任务栈最小剩余字节（0=任务未创建）；
+// health_age_ms=栈及 heap/minHeap/maxBlock 缓存的采样年龄（毫秒）。
+#ifdef LANMIC_ENABLE_SERIAL
 void printStatsLine() {
-    static uint32_t lastUsbTxCount = 0; // 上一秒的 TX 完成计数快照
+    static uint32_t lastUsbTxCount = 0, lastStatsMs = 0;
     const uint32_t now = millis();
+    const uint32_t statsWindowMs = uint32_t(now - lastStatsMs);
+    lastStatsMs = now;
+    const uint32_t capturedFrames = stats.capturedFrames.load(std::memory_order_relaxed);
+    const uint32_t encodedFrames = stats.encodedFrames.load(std::memory_order_relaxed);
+    const uint32_t sentFrames = stats.sentFrames.load(std::memory_order_relaxed);
+    const uint32_t captureGapMs = stats.captureGapMaxMs.exchange(0, std::memory_order_relaxed);
+    const uint32_t encodeGapMs = stats.encodeGapMaxMs.exchange(0, std::memory_order_relaxed);
+    const uint32_t sendGapMs = stats.sendGapMaxMs.exchange(0, std::memory_order_relaxed);
+    const uint32_t encodeWaitMs = stats.encodeWaitMaxMs.exchange(0, std::memory_order_relaxed);
+    const uint32_t sendWaitMs = stats.sendWaitMaxMs.exchange(0, std::memory_order_relaxed);
+    const uint32_t sendAgeMs = stats.sendAgeMaxMs.exchange(0, std::memory_order_relaxed);
+    const uint32_t encodeErrors = stats.encodeErrors.load(std::memory_order_relaxed);
+    const int32_t encodeError = stats.lastEncodeError.load(std::memory_order_relaxed);
+    const uint32_t pollBlocked = stats.downlinkPollBlocked.load(std::memory_order_relaxed);
+    const uint32_t receiverActive = downlinkReceiverActive.load(std::memory_order_acquire);
+    const uint32_t receiverEpoch = downlinkEpoch.load(std::memory_order_acquire);
+    // Sample USB counters together before stack scans can delay this low-priority task.
     const uint32_t usbTxCount = usb.getTxXferCount(); // ISR 侧累计完成数（volatile 字读取，跨任务安全）
-    const uint32_t usbTxXferDelta = uint32_t(usbTxCount - lastUsbTxCount); // 每秒增量（无符号差，回绕安全）
+    const uint32_t usbTxReadBytes = usb.getTxFifoReadTotal();
+    const uint32_t usbRxCount = usb.getRxXferCount();
+    const uint32_t usbRxBytes = usb.getRxTotalBytes();
+    const uint32_t usbRxDroppedBytes = usb.getRxDroppedBytes();
+    const uint32_t usbTxXferDelta = uint32_t(usbTxCount - lastUsbTxCount);
     lastUsbTxCount = usbTxCount;
     // Swap-out resets the window cells; a better sample landing between the
     // swap and a concurrent writer is lost for at most one window.
@@ -987,26 +1096,47 @@ void printStatsLine() {
     const int32_t fifoMax =
         stats.usbTxFifoMaxFree.exchange(-1, std::memory_order_relaxed);
     const long rssi = wifiSnapshotRssi.load(std::memory_order_acquire); // dBm，未连接打印 -128
-    // High-water mark in bytes on this Arduino-ESP32 core; 0 while the task never started.
-    const uint32_t audioStackMin = audioTaskHandle // audioTask 栈最小剩余字节；0=任务未创建
-        ? uint32_t(uxTaskGetStackHighWaterMark(audioTaskHandle)) : 0u;
-    const uint32_t encoderStackMin = encoderTaskHandle // encoderTask 栈最小剩余字节；0=任务未创建
-        ? uint32_t(uxTaskGetStackHighWaterMark(encoderTaskHandle)) : 0u;
-    const uint32_t netStackMin = networkTaskHandle // networkTask 栈最小剩余字节；0=任务未创建
-        ? uint32_t(uxTaskGetStackHighWaterMark(networkTaskHandle)) : 0u;
-    S_PRINTF(
-        "t_ms=%lu,a_ovr=%u,a_anch=%u,n_ovr=%u,n_anch=%u,"
+    static bool healthSampled = false;
+    static uint32_t lastHealthMs = 0;
+    static uint32_t audioStackMin = 0, encoderStackMin = 0, netStackMin = 0;
+    static uint32_t heapFree = 0, heapMinimum = 0, heapLargest = 0;
+    if (!healthSampled || uint32_t(now - lastHealthMs) >= 5000) {
+        // High-water marks are bytes on this core; 0 means no task handle.
+        audioStackMin = audioTaskHandle
+            ? uint32_t(uxTaskGetStackHighWaterMark(audioTaskHandle)) : 0u;
+        encoderStackMin = encoderTaskHandle
+            ? uint32_t(uxTaskGetStackHighWaterMark(encoderTaskHandle)) : 0u;
+        netStackMin = networkTaskHandle
+            ? uint32_t(uxTaskGetStackHighWaterMark(networkTaskHandle)) : 0u;
+        heapFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        heapMinimum = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        heapLargest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        lastHealthMs = now;
+        healthSampled = true;
+    }
+    // Avoid Print::printf's temporary allocation and second formatting pass.
+    static char line[2048];
+    const int length = std::snprintf(line, sizeof(line),
+        "t_ms=%lu,stats_window_ms=%lu,a_ovr=%u,a_anch=%u,n_ovr=%u,n_anch=%u,"
         "a_loop_max_us=%u,n_loop_max_us=%u,usb_tx_xfer=%u,"
         "n_state_us=%u,n_poll_us=%u,n_ctl_us=%u,n_rx_us=%u,n_dl_us=%u,"
         "n_enc_us=%u,n_send_us=%u,"
         "usb_fifo_min=%d,usb_fifo_max=%d,q_push_fail=%u,q_raw_fail=%u,"
         "q_enc_fail=%u,q_trim=%u,q_enc_trim=%u,q_pop_fail=%u,"
-        "plc_frames=%u,ul_rst=%u,udp_send_fail=%u,"
+        "plc_frames=%u,ul_rst=%u,udp_send_fail=%u,dl_send_wouldblock=%u,"
         "ctl_send_errno=%ld,dl_send_errno=%ld,"
         "sock_poll_rst=%u,sock_ctl_read_rst=%u,sock_ctl_send_rst=%u,"
         "sock_rx_read_rst=%u,sock_dl_send_rst=%u,"
-        "wifi_sleep_tog=%u,rssi_dbm=%ld,a_stack_min_b=%u,e_stack_min_b=%u,n_stack_min_b=%u\n",
+        "wifi_sleep_tog=%u,rssi_dbm=%ld,a_stack_min_b=%u,e_stack_min_b=%u,n_stack_min_b=%u,"
+        "heap=%u,minHeap=%u,maxBlock=%u,health_age_ms=%u,"
+        "usb_rx_xfer_total=%lu,usb_rx_bytes_total=%lu,usb_rx_drop_bytes=%lu,"
+        "usb_tx_read_bytes_total=%lu,play_underrun=%lu,play_trim=%lu,play_overflow=%lu,"
+        "dl_cap=%u,dl_enc=%u,dl_sent=%u,"
+        "dl_cap_gap_ms=%u,dl_enc_gap_ms=%u,dl_send_gap_ms=%u,"
+        "dl_enc_wait_ms=%u,dl_send_wait_ms=%u,dl_age_ms=%u,"
+        "dl_enc_err=%u,dl_enc_code=%ld,dl_poll_blocked=%u,dl_active=%u,dl_epoch=%u\n",
         (unsigned long)now,
+        (unsigned long)statsWindowMs,
         stats.audioPacerOverrun.load(std::memory_order_relaxed),
         stats.audioPacerAnchor.load(std::memory_order_relaxed),
         stats.netPacerOverrun.load(std::memory_order_relaxed),
@@ -1025,6 +1155,7 @@ void printStatsLine() {
         stats.plcFrames.load(std::memory_order_relaxed),
         stats.uplinkResets.load(std::memory_order_relaxed),
         stats.udpEndPacketFail.load(std::memory_order_relaxed),
+        stats.downlinkSendWouldBlock.load(std::memory_order_relaxed),
         long(controlSendErrno),
         long(downlinkSendErrno),
         socketPollReset,
@@ -1033,8 +1164,27 @@ void printStatsLine() {
         audioReadReset,
         downlinkSendReset,
         stats.wifiSleepToggles.load(std::memory_order_relaxed),
-        rssi, audioStackMin, encoderStackMin, netStackMin);
+        rssi, audioStackMin, encoderStackMin, netStackMin,
+        unsigned(heapFree), unsigned(heapMinimum), unsigned(heapLargest),
+        unsigned(uint32_t(now - lastHealthMs)),
+        (unsigned long)usbRxCount,
+        (unsigned long)usbRxBytes,
+        (unsigned long)usbRxDroppedBytes,
+        (unsigned long)usbTxReadBytes,
+        (unsigned long)(audioQueues ? audioQueues->microphone.underruns.load(std::memory_order_relaxed) : 0),
+        (unsigned long)(audioQueues ? audioQueues->microphone.trims.load(std::memory_order_relaxed) : 0),
+        (unsigned long)(audioQueues ? audioQueues->microphone.overflows.load(std::memory_order_relaxed) : 0),
+        capturedFrames, encodedFrames, sentFrames,
+        captureGapMs, encodeGapMs, sendGapMs,
+        encodeWaitMs, sendWaitMs, sendAgeMs,
+        encodeErrors, long(encodeError), pollBlocked, receiverActive, receiverEpoch);
+    if (length <= 0 || size_t(length) >= sizeof(line)) {
+        Serial.println("stats_format_error=1");
+        return;
+    }
+    Serial.write(reinterpret_cast<const uint8_t*>(line), size_t(length));
 }
+#endif
 } // namespace
 
 void setup() {
@@ -1047,6 +1197,19 @@ void setup() {
         setStatusLed(true);
         S_PRINTF("Status LED task creation failed\n");
     }
+    void* queueMemory = heap_caps_malloc(
+        sizeof(AudioQueues), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!queueMemory) {
+        statusError.store(true, std::memory_order_relaxed);
+        S_PRINTF("Audio queues PSRAM allocation failed: need=%u,maxBlock=%u\n",
+            unsigned(sizeof(AudioQueues)),
+            unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
+        return;
+    }
+    assert(esp_ptr_external_ram(queueMemory));
+    assert(reinterpret_cast<uintptr_t>(queueMemory) % alignof(AudioQueues) == 0);
+    assert(esp_ptr_internal(encoderTaskStack));
+    audioQueues = new (queueMemory) AudioQueues{};
     audio_tools::AudioToolsLogger.setLogLevel(audio_tools::AudioLogger::Error);
     const uint64_t mac = ESP.getEfuseMac();
     snprintf(usbSerial, sizeof(usbSerial), "%012llX", (unsigned long long)mac);
@@ -1136,15 +1299,29 @@ void setup() {
     // Wi-Fi modem sleep keeps the IDF default here; audioTask widens it to
     // WIFI_PS_NONE only while USB audio is streaming (see kWifiIdleSleepMs).
     WiFi.setAutoReconnect(true);
+    S_PRINTF("Before audio/network tasks: heap=%u,minHeap=%u,maxBlock=%u\n",
+        unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
     const auto audioResult = xTaskCreatePinnedToCore(
         audioTask, "sos-audio", 8192, nullptr, 4, &audioTaskHandle, 0);
+    // shortcut: initial alloca budgets for 20 ms audio, remeasure high-water marks before changing codec settings.
     const auto netResult = xTaskCreatePinnedToCore(
-        networkTask, "sos-network", 16384, nullptr, 3, &networkTaskHandle, 1);
-    const auto encoderResult = xTaskCreatePinnedToCore(
-        encoderTask, "sos-encoder", 8192, nullptr, 2, &encoderTaskHandle, 1);
+        networkTask, "sos-network", 32768, nullptr, 3, &networkTaskHandle, 1);
+    encoderTaskHandle = xTaskCreateStaticPinnedToCore(
+        encoderTask, "sos-encoder", sizeof(encoderTaskStack), nullptr, 2,
+        encoderTaskStack, &encoderTaskControl, 1);
+    const BaseType_t encoderResult = encoderTaskHandle ? pdPASS : errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
     if (audioResult != pdPASS || encoderResult != pdPASS || netResult != pdPASS) {
         statusError.store(true, std::memory_order_relaxed);
-        S_PRINTF("Audio/network task creation failed; restart after checking free heap\n");
+        S_PRINTF("Audio/network task creation failed: audio=%ld,network=%ld,encoder=%ld,"
+                 "heap=%u,minHeap=%u,maxBlock=%u,psramHeap=%u,psramMaxBlock=%u\n",
+            long(audioResult), long(netResult), long(encoderResult),
+            unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+            unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+            unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+            unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)),
+            unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
     }
 }
 
@@ -1185,10 +1362,12 @@ void loop() {
         }
     }
 
-    // One aggregated name=value stats line per second (see printStatsLine).
+#ifdef LANMIC_ENABLE_SERIAL
+    // Skip stack scans and counter exchanges entirely in silent builds.
     static uint32_t lastStatsMs = 0;
     if (uint32_t(now - lastStatsMs) >= 1000) {
         lastStatsMs = now;
         printStatsLine();
     }
+#endif
 }

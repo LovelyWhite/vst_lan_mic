@@ -21,7 +21,7 @@ constexpr uint32_t kOpusFrameDurationMs = 20;
 constexpr int kOpusBitrate = 192000;
 // Uplink (DAW -> device) Opus profile: mono at the same 20 ms framing.
 constexpr size_t kUplinkChannels = 1;
-constexpr int kUplinkBitrate = 128000;
+constexpr int kUplinkBitrate = 192000;
 constexpr size_t kOpusMaxBytes = 512;
 constexpr size_t kHeaderSize = 28;
 constexpr size_t kMaxPacketSize = kHeaderSize + kOpusMaxBytes;
