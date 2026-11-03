@@ -15,19 +15,25 @@ struct DebugStats {
     // waitNotify(): overrun counts missed polling periods; anchor also counts
     // notifications, so anchor >= overrun. Normal deadline wakeups count neither.
     std::atomic<uint32_t> netPacerOverrun{0}, netPacerAnchor{0};
-    // Max work time of a single loop pass (microseconds, 1 s window; excludes pacer/backoff sleep).
+    // Per-pass maxima (microseconds, 1 s window; excludes pacer/backoff sleep).
+    // Wall time, not CPU: these tasks are preempted by audioTask and the
+    // Wi-Fi/lwIP threads, so a max is one descheduled pass, not a typical cost.
     std::atomic<uint32_t> audioLoopMaxUs{0}, netLoopMaxUs{0};
-    // Max per-phase work time inside networkTask (microseconds, 1 s window).
-    std::atomic<uint32_t> netStateMaxUs{0}, netPollMaxUs{0};
+    // Per-phase maxima, all inside networkTask except netEncodeMaxUs, which
+    // encoderTask writes around opus_encode. netAudioRxMaxUs is the UDP uplink
+    // receive (recvfrom + the pass's bounded PLC decodes + one real decode +
+    // playout push), not USB RX; USB RX lives in audioLoopMaxUs.
+    std::atomic<uint32_t> netStateMaxUs{0};
     std::atomic<uint32_t> netControlMaxUs{0}, netAudioRxMaxUs{0}, netDownlinkMaxUs{0};
     std::atomic<uint32_t> netEncodeMaxUs{0}, netSendMaxUs{0};
     // Network diagnostics use cumulative timing, unaffected by serial window resets.
     std::atomic<uint32_t> receiveWorkUs{0}, encodeWorkUs{0};
     std::atomic<uint32_t> rawQueued{0}; // Sampled by the queue's consumer.
     // Downlink queues: push failure = a downlink frame dropped on a full
-    // raw/encoded queue; pop failure = woken by an enqueue notification when
-    // the encoded queue is already empty (notification race with the previous
-    // pass; should stay near 0).
+    // raw/encoded queue; pop failure = woken by an enqueue notification whose
+    // frame the previous pass already sent. Costs one extra no-work pass, no
+    // frame loss, so it grows steadily with downlink playtime and is not an
+    // error: rate matters, and only versus dl_enc/dl_sent.
     std::atomic<uint32_t> queuePushFail{0}, queuePopFail{0};
     std::atomic<uint32_t> rawPushFail{0}, encodedPushFail{0};
     std::atomic<uint32_t> rawTrimFrames{0}, encodedTrimFrames{0};
@@ -35,7 +41,8 @@ struct DebugStats {
     std::atomic<uint32_t> plcFrames{0}, uplinkResets{0};
     // Failed UDP sends (control replies + audio downlink, cumulative).
     std::atomic<uint32_t> udpEndPacketFail{0};
-    // Actual downlink sendto calls returning WouldBlock, not select snapshots.
+    // Downlink sendto calls returning WouldBlock with a frame pending;
+    // downlinkPollBlocked counts the same event for the diagnostics payload.
     std::atomic<uint32_t> downlinkSendWouldBlock{0};
     // Device -> DAW pipeline: cumulative counts and window timing maxima.
     std::atomic<uint32_t> capturedFrames{0}, encodedFrames{0}, sentFrames{0};
@@ -46,7 +53,7 @@ struct DebugStats {
     // errno of the most recent sendto hard error (0 = none yet).
     std::atomic<int32_t> controlSendErrno{0}, downlinkSendErrno{0};
     // Breakdown of socket rebuild reasons (cumulative).
-    std::atomic<uint32_t> socketPollReset{0}, controlReadReset{0}, controlSendReset{0};
+    std::atomic<uint32_t> controlReadReset{0}, controlSendReset{0};
     std::atomic<uint32_t> audioReadReset{0}, downlinkSendReset{0};
     // Wi-Fi modem sleep state transitions (entering/leaving each count once, cumulative).
     std::atomic<uint32_t> wifiSleepToggles{0};

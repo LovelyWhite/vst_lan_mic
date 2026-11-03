@@ -18,6 +18,9 @@ juce::String normalizedDeviceIdentity(const juce::String& value) {
     number = number.substring(number.length() - 6);
     return juce::String(sos::kDeviceName) + "-" + number;
 }
+// Compile-time switch: append a 1 Hz status/diagnostics line to
+// Documents/LANMIC/lanmic-{send,return}-*.log. Set to false to disable.
+constexpr bool kFileLogEnabled = false;
 constexpr uint32_t kMaxPlcFrames = 300 / sos::kOpusFrameDurationMs;
 constexpr uint32_t kMaxOutgoingAgeMs = 300;
 constexpr uint32_t kMaxOutgoingBacklogFrames = 32;
@@ -156,6 +159,8 @@ void Transport::prepareReceive() {
 }
 
 void Transport::run() {
+    juce::File logFile; // Resolved on first write; survives reconnects.
+    uint32_t lastLogMs = 0;
     int codecStatus = OPUS_OK;
     OpusDecoder* decoder = sending_
         ? nullptr
@@ -303,6 +308,23 @@ void Transport::run() {
 
         while (!threadShouldExit()) {
             const auto now = nowMs();
+            if constexpr (kFileLogEnabled) {
+                if (uint32_t(now - lastLogMs) >= 1000) {
+                    lastLogMs = now;
+                    if (logFile == juce::File()) {
+                        auto dir = juce::File::getSpecialLocation(
+                            juce::File::userDocumentsDirectory).getChildFile("LANMIC");
+                        dir.createDirectory();
+                        logFile = dir.getNonexistentChildFile(
+                            sending_ ? "lanmic-send" : "lanmic-return", "log");
+                    }
+                    auto line = juce::Time::getCurrentTime().formatted("%Y-%m-%d %H:%M:%S ")
+                        + status();
+                    if (!sending_)
+                        line += " | " + receiveDiagnostics().replaceCharacter('\n', ' ');
+                    logFile.appendText(line + "\n");
+                }
+            }
             const bool enabled = enabled_.load(std::memory_order_acquire);
             const auto newVersion = preferenceVersion_.load();
             if (newVersion != version) {

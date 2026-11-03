@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -17,11 +16,6 @@ public:
         IPAddress ip;
         uint16_t port = 0;
         int length = 0;
-    };
-
-    struct Ready {
-        bool read = false;
-        bool write = false;
     };
 
     enum class SendResult {
@@ -66,31 +60,11 @@ public:
         }
     }
 
-    static bool poll(NonBlockingUdp& first, Ready& firstReady,
-                     NonBlockingUdp& second, Ready& secondReady) {
-        firstReady = {};
-        secondReady = {};
-        fd_set readFds, writeFds;
-        FD_ZERO(&readFds);
-        FD_ZERO(&writeFds);
-
-        int maxFd = -1;
-        addFd(first.fd_, readFds, writeFds, maxFd);
-        addFd(second.fd_, readFds, writeFds, maxFd);
-        if (maxFd < 0) return false;
-
-        timeval timeout{0, 0};
-        const int result = ::select(maxFd + 1, &readFds, &writeFds, nullptr, &timeout);
-        if (result < 0) return false;
-        firstReady = readyFor(first.fd_, readFds, writeFds);
-        secondReady = readyFor(second.fd_, readFds, writeFds);
-        return true;
-    }
-
-    int read(const Ready& ready, uint8_t* data, size_t capacity, Packet& packet) {
+    // Sockets are O_NONBLOCK, so recvfrom/sendto report readiness themselves
+    // via EAGAIN; a per-pass select() would only add latency.
+    int read(uint8_t* data, size_t capacity, Packet& packet) {
         packet = {};
         if (fd_ < 0) return -1;
-        if (!ready.read) return 0;
 
         sockaddr_in from{};
         socklen_t fromLen = sizeof(from);
@@ -105,14 +79,13 @@ public:
         return got;
     }
 
-    SendResult sendTo(Ready& ready, IPAddress ip, uint16_t port,
+    SendResult sendTo(IPAddress ip, uint16_t port,
                       const uint8_t* data, size_t bytes) {
         lastError_ = 0;
         if (fd_ < 0) {
             lastError_ = EBADF;
             return SendResult::Error;
         }
-        if (!ready.write) return SendResult::WouldBlock;
 
         sockaddr_in to{};
         to.sin_family = AF_INET;
@@ -123,7 +96,6 @@ public:
                                   sizeof(to));
         if (sent == int(bytes)) return SendResult::Sent;
         lastError_ = sent < 0 ? errno : EIO;
-        ready.write = false;
         return isWouldBlock(lastError_) ? SendResult::WouldBlock
                                         : SendResult::Error;
     }
@@ -135,18 +107,6 @@ public:
 private:
     static bool isWouldBlock(int error) {
         return error == EAGAIN || error == EWOULDBLOCK || error == ENOMEM;
-    }
-
-    static void addFd(int fd, fd_set& readFds, fd_set& writeFds, int& maxFd) {
-        if (fd < 0) return;
-        FD_SET(fd, &readFds);
-        FD_SET(fd, &writeFds);
-        if (fd > maxFd) maxFd = fd;
-    }
-
-    static Ready readyFor(int fd, const fd_set& readFds, const fd_set& writeFds) {
-        if (fd < 0) return {};
-        return {FD_ISSET(fd, &readFds) != 0, FD_ISSET(fd, &writeFds) != 0};
     }
 
     int fd_ = -1;

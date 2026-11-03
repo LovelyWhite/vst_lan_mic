@@ -27,6 +27,10 @@ constexpr uint32_t kMaxEncodedBacklogFrames = 8;
 // Opus PLC synthesizes at most 300 ms of concealment; longer gaps reset the
 // decoder instead of padding with noise.
 constexpr uint32_t kMaxPlcFrames = 300 / sos::kOpusFrameDurationMs;
+// Concealment frames synthesized per pass. A full 300 ms gap would otherwise
+// run 15 Opus decodes in one pass; the remainder is spread over later passes,
+// which the 300 ms playout target absorbs.
+constexpr uint32_t kMaxPlcPerPass = 3;
 
 constexpr uint32_t plcFramesForGap(uint32_t gap) {
     return gap <= kMaxPlcFrames ? gap : 0;
@@ -66,6 +70,10 @@ void networkTask(void*) {
     Peer sender, receiver;
     bool uplinkSequenceValid = false;
     uint32_t nextUplinkSequence = 0;
+    // Concealment owed to playout, and the uplink frame staged behind it: the
+    // frame is decoded only once its PLC frames are out, so ordering holds.
+    uint32_t plcPending = 0, heldSequence = 0;
+    uint16_t heldPayloadBytes = 0;
     uint32_t lastRetry = 0, lastValidAudio = 0;
     uint32_t nextDownlinkAttemptMs = 0;
     uint32_t downlinkBackoffMs = 10;
@@ -76,11 +84,13 @@ void networkTask(void*) {
     EncodedFrame pendingDownlink;
     IPAddress boundIp, currentIp;
     std::array<uint8_t, sos::kMaxPacketSize + 1> packet{};
-    NonBlockingUdp::Ready controlReady, audioReady;
 
     // Uplink decoder mirrors the plugin's stereo 20 ms encoder profile; like the
     // encoder it stays in internal RAM.
     alignas(4) static sos::OpusFrame decoded{};
+    // Dedicated to the uplink so a staged frame survives control/downlink reuse
+    // of packet.
+    alignas(4) static std::array<uint8_t, sos::kMaxPacketSize + 1> audioPacket{};
     const int opusDecoderBytes = opus_decoder_get_size(sos::kOpusChannels);
     void* opusDecoderMemory = opusDecoderBytes > 0
         ? heap_caps_malloc(size_t(opusDecoderBytes), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
@@ -101,8 +111,24 @@ void networkTask(void*) {
     };
     auto resetUplink = [&] {
         uplinkSequenceValid = false;
+        plcPending = 0;
+        heldPayloadBytes = 0;
         ++stats.uplinkResets;
         opus_decoder_ctl(opusDecoder, OPUS_RESET_STATE);
+    };
+
+    // Emits at most kMaxPlcPerPass concealment frames; callers only invoke it
+    // when plcPending is 0 or has just been set, so the per-pass cap holds.
+    auto emitPlc = [&] {
+        for (uint32_t i = 0; i < kMaxPlcPerPass && plcPending != 0; ++i) {
+            if (decodeIntoFrame(nullptr, 0) != int(sos::kOpusFrameSamples)) {
+                resetUplink(); // Also drops the frame staged behind it.
+                return;
+            }
+            stats.plcFrames.fetch_add(1, std::memory_order_relaxed);
+            microphone.push(decoded);
+            --plcPending;
+        }
     };
 
     auto invalidateSender = [&] {
@@ -171,18 +197,8 @@ void networkTask(void*) {
 
         if (socketsReady) {
             netPhaseStartUs = esp_timer_get_time();
-            if (!NonBlockingUdp::poll(control, controlReady, audio, audioReady)) {
-                ++stats.socketPollReset;
-                resetSockets();
-            }
-            statsMax(stats.netPollMaxUs,
-                     uint32_t(esp_timer_get_time() - netPhaseStartUs));
-        }
-
-        if (socketsReady) {
-            netPhaseStartUs = esp_timer_get_time();
             for (int n = 0; n < kMaxControlPacketsPerNetLoop; ++n) {
-                const int got = control.read(controlReady, packet.data(), packet.size(), received);
+                const int got = control.read(packet.data(), packet.size(), received);
                 if (got < 0) {
                     ++stats.controlReadReset;
                     resetSockets();
@@ -224,7 +240,7 @@ void networkTask(void*) {
                     continue;
                 }
                 const auto bytes = sos::encode(packet.data(), reply);
-                const auto sent = control.sendTo(controlReady, ip, port, packet.data(), bytes);
+                const auto sent = control.sendTo(ip, port, packet.data(), bytes);
                 if (sent == NonBlockingUdp::SendResult::Error) {
                     ++stats.udpEndPacketFail;
                     ++stats.controlSendReset;
@@ -239,56 +255,53 @@ void networkTask(void*) {
 
         if (socketsReady) {
             netPhaseStartUs = esp_timer_get_time();
+            // Concealment left over from an earlier pass goes out first so its
+            // frames stay ahead of the real frame staged behind them.
+            emitPlc();
             for (int n = 0; n < kMaxAudioPacketsPerNetLoop; ++n) {
-                const int got = audio.read(audioReady, packet.data(), packet.size(), received);
-                if (got < 0) {
-                    ++stats.audioReadReset;
-                    resetSockets();
-                    break;
-                }
-                if (!got) break;
-                const int length = received.length;
-                const IPAddress ip = received.ip;
-                const uint16_t port = received.port;
-                sos::Header h;
-                if (got != length || !sos::decode(packet.data(), size_t(got), h) ||
-                    h.kind != sos::Kind::AudioOpus || !sender.active(now) ||
-                    !sender.matches(ip, port, h.session)) continue;
-                if (uint32_t(now - lastValidAudio) >= sos::kAudioTimeoutMs)
-                    uplinkSequenceValid = false;
-
-                uint32_t gap = 0;
-                if (uplinkSequenceValid) {
-                    gap = h.sequence - nextUplinkSequence;
-                    if (gap >= 0x80000000u) continue; // Duplicate or late packet.
-                }
-                if (gap > kMaxPlcFrames) {
-                    resetUplink();
-                    // Only the audio consumer may clear and re-prime playout.
-                    ++uplinkEpoch;
-                }
-                bool decodeOk = true;
-                const uint32_t plcFrames = plcFramesForGap(gap);
-                // shortcut: up to 15 PLC frames still run in one pass; split across loops if measured stalls persist.
-                for (uint32_t i = 0; i < plcFrames; ++i) {
-                    const int samples = decodeIntoFrame(nullptr, 0);
-                    if (samples != int(sos::kOpusFrameSamples)) {
-                        decodeOk = false;
+                if (heldPayloadBytes == 0) {
+                    const int got = audio.read(audioPacket.data(), audioPacket.size(), received);
+                    if (got < 0) {
+                        ++stats.audioReadReset;
+                        resetSockets();
                         break;
                     }
-                    stats.plcFrames.fetch_add(1, std::memory_order_relaxed);
-                    microphone.push(decoded);
+                    if (!got) break;
+                    const int length = received.length;
+                    const IPAddress ip = received.ip;
+                    const uint16_t port = received.port;
+                    sos::Header h;
+                    if (got != length || !sos::decode(audioPacket.data(), size_t(got), h) ||
+                        h.kind != sos::Kind::AudioOpus || !sender.active(now) ||
+                        !sender.matches(ip, port, h.session)) continue;
+                    if (uint32_t(now - lastValidAudio) >= sos::kAudioTimeoutMs)
+                        uplinkSequenceValid = false;
+
+                    uint32_t gap = 0;
+                    if (uplinkSequenceValid) {
+                        gap = h.sequence - nextUplinkSequence;
+                        if (gap >= 0x80000000u) continue; // Duplicate or late packet.
+                    }
+                    if (gap > kMaxPlcFrames) {
+                        resetUplink();
+                        // Only the audio consumer may clear and re-prime playout.
+                        ++uplinkEpoch;
+                    }
+                    plcPending = plcFramesForGap(gap);
+                    heldSequence = h.sequence;
+                    heldPayloadBytes = h.payloadBytes;
+                    emitPlc(); // Small gaps still finish inside this pass.
                 }
-                const int samples = decodeOk
-                    ? decodeIntoFrame(packet.data() + sos::kHeaderSize,
-                                      h.payloadBytes)
-                    : OPUS_INTERNAL_ERROR;
+                if (plcPending != 0) break; // Longer gaps defer the staged frame.
+                const int samples = decodeIntoFrame(audioPacket.data() + sos::kHeaderSize,
+                                                    heldPayloadBytes);
                 if (samples != int(sos::kOpusFrameSamples)) {
                     resetUplink();
                     continue;
                 }
                 microphone.push(decoded);
-                nextUplinkSequence = h.sequence + 1;
+                nextUplinkSequence = heldSequence + 1;
+                heldPayloadBytes = 0;
                 uplinkSequenceValid = true;
                 lastValidAudio = now;
                 lastUplinkMs.store(now, std::memory_order_release);
@@ -323,13 +336,6 @@ void networkTask(void*) {
             for (int n = 0; n < kMaxDownlinkFramesPerNetLoop; ++n) {
                 const uint32_t sendNow = millis();
                 if (int32_t(sendNow - nextDownlinkAttemptMs) < 0) break;
-                if (!audioReady.write) {
-                    if (encodedDownlink.size() != 0) ++stats.downlinkPollBlocked;
-                    nextDownlinkAttemptMs = sendNow + downlinkBackoffMs;
-                    downlinkBackoffMs =
-                        std::min(downlinkBackoffMs * 2, uint32_t(100));
-                    break;
-                }
                 if (!encodedDownlink.peek(pendingDownlink)) break; // Queue drained.
                 sos::Header h{sos::Kind::AudioOpus, 0, bootSession,
                               pendingDownlink.sequence, pendingDownlink.capturedMs,
@@ -339,7 +345,7 @@ void networkTask(void*) {
                        pendingDownlink.payload.data(),
                        pendingDownlink.payloadBytes);
                 const int64_t downlinkStepUs = esp_timer_get_time();
-                const auto sent = audio.sendTo(audioReady, receiver.ip, receiver.port,
+                const auto sent = audio.sendTo(receiver.ip, receiver.port,
                                                packet.data(), bytes);
                 statsMax(stats.netSendMaxUs,
                          uint32_t(esp_timer_get_time() - downlinkStepUs));
@@ -362,6 +368,9 @@ void networkTask(void*) {
                         invalidateReceiver();
                     } else {
                         ++stats.downlinkSendWouldBlock;
+                        // Frame was pending and the socket refused it: the
+                        // meaning diagnostics report as pollBlocked.
+                        ++stats.downlinkPollBlocked;
                     }
                     nextDownlinkAttemptMs = sendNow + downlinkBackoffMs;
                     downlinkBackoffMs =
@@ -376,31 +385,29 @@ void networkTask(void*) {
         if (socketsReady && receiver.active(diagnosticsNow) &&
             uint32_t(diagnosticsNow - lastDiagnosticsMs) >= 1000) {
             lastDiagnosticsMs = diagnosticsNow;
-            if (controlReady.write) {
-                const sos::DeviceDiagnostics diagnostics{
-                    stats.capturedFrames.load(std::memory_order_relaxed),
-                    stats.encodedFrames.load(std::memory_order_relaxed),
-                    stats.sentFrames.load(std::memory_order_relaxed),
-                    stats.rawPushFail.load(std::memory_order_relaxed),
-                    stats.encodedPushFail.load(std::memory_order_relaxed),
-                    stats.rawTrimFrames.load(std::memory_order_relaxed),
-                    stats.encodedTrimFrames.load(std::memory_order_relaxed),
-                    stats.encodeErrors.load(std::memory_order_relaxed),
-                    stats.downlinkSendWouldBlock.load(std::memory_order_relaxed),
-                    stats.downlinkPollBlocked.load(std::memory_order_relaxed),
-                    stats.plcFrames.load(std::memory_order_relaxed),
-                    stats.receiveWorkUs.load(std::memory_order_relaxed),
-                    stats.encodeWorkUs.load(std::memory_order_relaxed),
-                    stats.rawQueued.load(std::memory_order_relaxed), encodedDownlink.size(),
-                    wifiSnapshotRssi.load(std::memory_order_relaxed)};
-                const sos::Header h{sos::Kind::Diagnostics, 0, bootSession,
-                                    diagnosticsSequence++, diagnosticsNow,
-                                    uint16_t(sos::kDiagnosticsBytes)};
-                const auto bytes = sos::encode(packet.data(), h);
-                sos::encodeDiagnostics(packet.data() + sos::kHeaderSize, diagnostics);
-                // Best effort after audio: no retry, lease reset, or audio error accounting.
-                control.sendTo(controlReady, receiver.ip, receiver.port, packet.data(), bytes);
-            }
+            const sos::DeviceDiagnostics diagnostics{
+                stats.capturedFrames.load(std::memory_order_relaxed),
+                stats.encodedFrames.load(std::memory_order_relaxed),
+                stats.sentFrames.load(std::memory_order_relaxed),
+                stats.rawPushFail.load(std::memory_order_relaxed),
+                stats.encodedPushFail.load(std::memory_order_relaxed),
+                stats.rawTrimFrames.load(std::memory_order_relaxed),
+                stats.encodedTrimFrames.load(std::memory_order_relaxed),
+                stats.encodeErrors.load(std::memory_order_relaxed),
+                stats.downlinkSendWouldBlock.load(std::memory_order_relaxed),
+                stats.downlinkPollBlocked.load(std::memory_order_relaxed),
+                stats.plcFrames.load(std::memory_order_relaxed),
+                stats.receiveWorkUs.load(std::memory_order_relaxed),
+                stats.encodeWorkUs.load(std::memory_order_relaxed),
+                stats.rawQueued.load(std::memory_order_relaxed), encodedDownlink.size(),
+                wifiSnapshotRssi.load(std::memory_order_relaxed)};
+            const sos::Header h{sos::Kind::Diagnostics, 0, bootSession,
+                                diagnosticsSequence++, diagnosticsNow,
+                                uint16_t(sos::kDiagnosticsBytes)};
+            const auto bytes = sos::encode(packet.data(), h);
+            sos::encodeDiagnostics(packet.data() + sos::kHeaderSize, diagnostics);
+            // Best effort after audio: no retry, lease reset, or audio error accounting.
+            control.sendTo(receiver.ip, receiver.port, packet.data(), bytes);
         }
         // Poll at 5 ms while bound, 50 ms otherwise; notifications can wake sooner.
         pacer.setPeriodUs(socketsReady ? 5000 : 50000);

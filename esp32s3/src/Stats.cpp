@@ -48,8 +48,6 @@ void printStatsLine() {
         stats.netLoopMaxUs.exchange(0, std::memory_order_relaxed);
     const uint32_t netStateUs =
         stats.netStateMaxUs.exchange(0, std::memory_order_relaxed);
-    const uint32_t netPollUs =
-        stats.netPollMaxUs.exchange(0, std::memory_order_relaxed);
     const uint32_t netControlUs =
         stats.netControlMaxUs.exchange(0, std::memory_order_relaxed);
     const uint32_t netAudioRxUs =
@@ -68,8 +66,6 @@ void printStatsLine() {
         stats.rawTrimFrames.load(std::memory_order_relaxed);
     const uint32_t encodedTrimFrames =
         stats.encodedTrimFrames.load(std::memory_order_relaxed);
-    const uint32_t socketPollReset =
-        stats.socketPollReset.load(std::memory_order_relaxed);
     const uint32_t controlReadReset =
         stats.controlReadReset.load(std::memory_order_relaxed);
     const uint32_t controlSendReset =
@@ -110,13 +106,13 @@ void printStatsLine() {
     const int length = std::snprintf(line, sizeof(line),
         "t_ms=%lu,stats_window_ms=%lu,a_ovr=%u,a_anch=%u,n_ovr=%u,n_anch=%u,"
         "a_loop_max_us=%u,n_loop_max_us=%u,usb_tx_xfer=%u,"
-        "n_state_us=%u,n_poll_us=%u,n_ctl_us=%u,n_rx_us=%u,n_dl_us=%u,"
+        "n_state_us=%u,n_ctl_us=%u,n_rx_us=%u,n_dl_us=%u,"
         "n_enc_us=%u,n_send_us=%u,"
         "usb_fifo_min=%d,usb_fifo_max=%d,q_push_fail=%u,q_raw_fail=%u,"
         "q_enc_fail=%u,q_trim=%u,q_enc_trim=%u,q_pop_fail=%u,"
         "plc_frames=%u,ul_rst=%u,udp_send_fail=%u,dl_send_wouldblock=%u,"
         "ctl_send_errno=%ld,dl_send_errno=%ld,"
-        "sock_poll_rst=%u,sock_ctl_read_rst=%u,sock_ctl_send_rst=%u,"
+        "sock_ctl_read_rst=%u,sock_ctl_send_rst=%u,"
         "sock_rx_read_rst=%u,sock_dl_send_rst=%u,"
         "wifi_sleep_tog=%u,rssi_dbm=%ld,a_stack_min_b=%u,e_stack_min_b=%u,n_stack_min_b=%u,"
         "heap=%u,minHeap=%u,maxBlock=%u,health_age_ms=%u,"
@@ -133,7 +129,7 @@ void printStatsLine() {
         stats.netPacerOverrun.load(std::memory_order_relaxed),
         stats.netPacerAnchor.load(std::memory_order_relaxed),
         audioLoopUs, netLoopUs, usbTxXferDelta,
-        netStateUs, netPollUs, netControlUs, netAudioRxUs, netDownlinkUs,
+        netStateUs, netControlUs, netAudioRxUs, netDownlinkUs,
         netEncodeUs, netSendUs,
         fifoMin == INT32_MAX ? -1 : int(fifoMin),
         int(fifoMax),
@@ -149,7 +145,6 @@ void printStatsLine() {
         stats.downlinkSendWouldBlock.load(std::memory_order_relaxed),
         long(controlSendErrno),
         long(downlinkSendErrno),
-        socketPollReset,
         controlReadReset,
         controlSendReset,
         audioReadReset,

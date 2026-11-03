@@ -76,7 +76,7 @@ public:
 #else
     // Favor duplex monitoring stability; leave room above target for receive bursts.
     static constexpr size_t frameCapacity = 65536;
-    static constexpr uint32_t targetMs = 500;
+    static constexpr uint32_t targetMs = 300;
     static constexpr float maxRateCorrection = 0.002f;
 #endif
     // Queue lengths are in interleaved samples; targets stay in milliseconds

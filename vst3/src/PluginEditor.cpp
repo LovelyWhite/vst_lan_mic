@@ -236,7 +236,11 @@ void BridgeEditor::resized() {
         }
     }
     area.removeFromTop(kRowGap);
-    credit_.setBounds(area.removeFromTop(kFooterHeight));
+    // The hit area must match the right-aligned text: a full-width row turned
+    // the empty space left of the credit into accidental clicks.
+    const auto creditWidth = juce::GlyphArrangement::getStringWidthInt(
+        juce::Font(juce::FontOptions(11.0f)), credit_.getButtonText()) + 8;
+    credit_.setBounds(area.removeFromTop(kFooterHeight).removeFromRight(creditWidth));
 }
 
 void BridgeEditor::timerCallback() {
