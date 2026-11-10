@@ -10,9 +10,9 @@
 
 #include "AudioTasks.h"
 #include "DeviceIdentity.h"
-#include "Log.h"
 #include "NonBlockingUdp.h"
 #include "Pacer.h"
+#include "Serial.h"
 #include "Status.h"
 
 namespace lanmic {
@@ -95,7 +95,7 @@ void networkTask(void*) {
         ? opus_decoder_init(opusDecoder, sos::kSampleRate, sos::kOpusChannels)
         : OPUS_ALLOC_FAIL;
     if (opusDecoderStatus != OPUS_OK) {
-        S_PRINTF("Opus decoder initialization failed: %d\n", opusDecoderStatus);
+        SERIAL_PRINTF("Opus decoder initialization failed: %d\n", opusDecoderStatus);
         if (opusDecoderMemory) heap_caps_free(opusDecoderMemory);
         statusError.store(true, std::memory_order_relaxed);
         for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
@@ -174,7 +174,7 @@ void networkTask(void*) {
                 continue;
             }
             boundIp = currentIp;
-            S_PRINTF("Wi-Fi ready: %s, device %s\n", boundIp.toString().c_str(), identity);
+            SERIAL_PRINTF("Wi-Fi ready: %s, device %s\n", boundIp.toString().c_str(), identity);
         }
 
         if (sender.port && !sender.active(now)) invalidateSender();

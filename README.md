@@ -89,7 +89,7 @@ Send **不改变 DAW 轨道的原始输出**，立体声音轨保留左右声道
 | --- | --- |
 | PlatformIO 平台 | pioarduino `53.03.11` |
 | Arduino-ESP32 | `3.1.1` |
-| arduino-audio-tools | 提交 `27547291d4a1514e64d37a97f1ce34636af86bd6` |
+| arduino-audio-tools | `v1.3.0` |
 | codec-opus | `v1.6.1` |
 | WiFiManager | `2.0.17` |
 | C++ 标准 | C++17 |
@@ -106,7 +106,7 @@ pio run -d esp32s3 -e esp32-s3-devkitc-1 -t upload
 | 任务 | 核心 | 优先级 | 栈 | 职责 |
 | --- | --- | --- | --- | --- |
 | `audioTask` | Core 0 | 4 | 8 KiB | USB 收发、音量处理与 PCM 组帧 |
-| `networkTask` | Core 1 | 3 | 32 KiB | 设备发现、订阅、UDP 收发与上行解码 |
+| `networkTask` | Core 0 | 3 | 32 KiB | 设备发现、订阅、UDP 收发与上行解码 |
 | `encoderTask` | Core 1 | 2 | 48 KiB | 手机播放音频的立体声 Opus 编码 |
 
 PCM 播放和采集队列位于 PSRAM；编解码器状态及编码任务静态栈位于内部 RAM。设备使用非阻塞 socket 和任务通知传递音频，Opus 采用固定点与 Xtensa 优化。
@@ -145,7 +145,7 @@ cmake --build --preset mac-universal
 
 ## 安装与打包
 
-`site/` 提供随仓库分发的 [macOS 安装包](site/LANMIC_0.1.0.pkg) 和 [Windows 安装包](site/LANMIC_Setup_0.1.0.exe)。开发时可从源码构建对应版本；固件与插件需要使用相同的协议版本。
+`site/` 提供随仓库分发的 [macOS 安装包](site/LANMIC_{VERSION}.pkg) 和 [Windows 安装包](site/LANMIC_Setup_{VERSION}.exe)。开发时可从源码构建对应版本；固件与插件需要使用相同的协议版本。
 
 已有构建产物可通过脚本安装。以下命令在项目根目录执行：
 
@@ -183,7 +183,7 @@ bash scripts/make_pkg.sh vst3/build-universal
 
 ## PCB 外壳模型
 
-`docs/3D_PCB1_2026-11-09.obj` 是 EasyEDA 导出的 PCB 三维模型（单位 mm，板面 `z = 0`，板厚 `z -0.800..0.000`，原 1.0 厚已改为 0.8）。外壳为**底盒 + 上盖、分型面免螺钉无痕粘接、带板定位台阶**，由脚本 [docs/enc_build.py](docs/enc_build.py) 在 FreeCAD 中参数化生成，所有坐标都沿用 PCB 模型坐标系。当前版本按 **FDM 0.4 喷嘴**优化：所有打印实体特征 ≥ `0.40`（恰好一条线），止口模型单边间隙 `0.05`，叠加打印切宽后成品约 `0.08`/边（见下表）。
+`docs/3D_PCB1_2026-11-09.obj` 是 EasyEDA 导出的 PCB 三维模型（单位 mm，板面 `z = 0`，板厚 `z -0.800..0.000`）。外壳为**底盒 + 上盖、分型面免螺钉无痕粘接、带板定位台阶**，由脚本 [docs/enc_build.py](docs/enc_build.py) 在 FreeCAD 中参数化生成，所有坐标都沿用 PCB 模型坐标系。当前版本按 **FDM 0.4 喷嘴**优化：所有打印实体特征 ≥ `0.40`（恰好一条线），止口模型单边间隙 `0.05`，叠加打印切宽后成品约 `0.08`/边（见下表）。
 
 模型中已确认的元件（坐标为实测包络）：
 

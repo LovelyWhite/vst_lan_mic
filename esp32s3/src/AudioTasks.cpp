@@ -6,8 +6,8 @@
 #include <algorithm>
 #include <array>
 
-#include "Log.h"
 #include "Pacer.h"
+#include "Serial.h"
 #include "Status.h"
 #include "UsbAudio.h"
 
@@ -17,11 +17,6 @@ namespace {
 // How long the USB bridge must stay quiet before Wi-Fi modem sleep is
 // re-enabled; holding the radio awake costs real current while idle.
 constexpr uint32_t kWifiIdleSleepMs = 5000;
-// ISO-IN transfers complete once per millisecond while the host keeps the
-// streaming alt setting open, so a 100 ms silence in the ISR-side completion
-// counter means the endpoint is closed (or the cable pulled; mounted() covers
-// that instantly).
-constexpr uint32_t kUsbTxActiveTimeoutMs = 100;
 constexpr uint32_t kMaxCapturedBacklogFrames = 5;
 
 } // namespace
@@ -47,30 +42,8 @@ void audioTask(void*) {
     bool wifiModemSleeping = true; // IDF default while associated.
     std::array<uint8_t, 192> speakerBytes{};
     std::array<int16_t, 96> micSamples{};
-    int32_t speakerLeftGainQ16 = int32_t(kUsbUnityGainQ16);
-    int32_t speakerRightGainQ16 = int32_t(kUsbUnityGainQ16);
-    uint32_t lastUsbTxCount = usb.getTxXferCount();
-    uint32_t lastUsbTxProgressMs = 0;
-    auto smoothGain = [](int32_t current, int32_t target) {
-        const int32_t difference = target - current;
-        if (difference == 0) return current;
-        int32_t step = difference / 240; // About 5 ms at 48 kHz.
-        if (step == 0) step = difference > 0 ? 1 : -1;
-        return current + step;
-    };
     for (;;) {
-        const uint32_t audioLoopNow = millis();
-        // isStreamingActiveTx() can stay false on ESP32-S3 despite live ISO-IN.
-        // Use the ISR completion counter, which advances once per millisecond.
-        const uint32_t usbTxCount = usb.getTxXferCount();
-        const bool usbTxProgress = usbTxCount != lastUsbTxCount;
-        const uint32_t sinceProgressMs = audioLoopNow - lastUsbTxProgressMs;
-        if (usbTxProgress) {
-            lastUsbTxCount = usbTxCount;
-            lastUsbTxProgressMs = audioLoopNow;
-        }
-        const bool txActive = usb.mounted() &&
-            (usbTxProgress || sinceProgressMs < kUsbTxActiveTimeoutMs);
+        const bool txActive = usb.mounted() && usb.isStreamingActiveTx();
         const bool rxActive = usb.mounted() && usb.isStreamingActiveRx();
         statusAudioStreaming.store(txActive || rxActive, std::memory_order_relaxed);
         // Modem sleep trades a little Wi-Fi latency for a large idle power
@@ -80,11 +53,13 @@ void audioTask(void*) {
             if (wifiModemSleeping) {
                 wifiModemSleeping = false;
                 WiFi.setSleep(false);
+                SERIAL_PRINTF("WiFi active\n");
             }
         } else if (!wifiModemSleeping &&
                    uint32_t(millis() - lastStreamActiveMs) >= kWifiIdleSleepMs) {
             WiFi.setSleep(true);
             wifiModemSleeping = true;
+            SERIAL_PRINTF("WiFi sleep\n");
         }
         const auto newEpoch = uplinkEpoch.load(std::memory_order_acquire);
         const bool fresh = uint32_t(millis() - lastUplinkMs.load()) < sos::kAudioTimeoutMs;
@@ -92,24 +67,32 @@ void audioTask(void*) {
             microphone.reset();
             epoch = newEpoch;
         }
+        if (txActive != txWasActive)
+            SERIAL_PRINTF("USB tx %s\n", txActive ? "active" : "idle");
         txWasActive = txActive;
         uplinkWasFresh = fresh;
 
         // Keep the 48-packet FIFO nearly full to absorb ~47 ms scheduling stalls.
-        // Feed bufferTx() directly: write() can block or silently discard data
-        // because of the unreliable TX-active flag. This task is the only writer;
-        // the ISR only drains, so checked free space cannot shrink before writing.
+        // Feed bufferTx() directly: write() can block or silently discard data.
+        // This task is the only writer; the ISR only drains, so checked free
+        // space cannot shrink before writing.
         if (txActive) {
             microphone.prepare();
             for (int batch = 0; batch < 8 &&
                  usb.availableForWrite() >= int(sizeof(micSamples)); ++batch) {
-                for (size_t i = 0; i < 48; ++i) {
+                if (fresh) {
                     // True stereo uplink: pass the DAW's L/R through to USB IN
                     // instead of duplicating one channel.
-                    float stereo[2]{0.0f, 0.0f};
-                    if (fresh) microphone.next(stereo);
-                    micSamples[2 * i] = sos::pcm16(stereo[0]);
-                    micSamples[2 * i + 1] = sos::pcm16(stereo[1]);
+                    for (size_t i = 0; i < 48; ++i) {
+                        float stereo[2];
+                        microphone.next(stereo);
+                        micSamples[2 * i] = sos::pcm16(stereo[0]);
+                        micSamples[2 * i + 1] = sos::pcm16(stereo[1]);
+                    }
+                } else {
+                    // Same all-zero frame the per-sample path produced, without
+                    // 96 float->PCM16 conversions per batch.
+                    micSamples.fill(0);
                 }
                 usb.bufferTx().writeArray(
                     reinterpret_cast<uint8_t*>(micSamples.data()),
@@ -120,38 +103,22 @@ void audioTask(void*) {
         }
 
         if (rxActive != rxWasActive) {
+            SERIAL_PRINTF("USB rx %s\n", rxActive ? "active" : "idle");
             frameUsed = 0;
-            // Only this task consumes bufferRx().
-            while (usb.available() > 0)
+            // Only this task consumes bufferRx(). The cap is required: while the
+            // host keeps streaming, the ISR refills faster than this drains, so an
+            // unbounded loop could hold the 1 ms task off its grid indefinitely.
+            // shortcut: drops <= 8*192 B; an older backlog plays through next tick.
+            for (int batch = 0; batch < 8 && usb.available() > 0; ++batch)
                 usb.readBytes(speakerBytes.data(), speakerBytes.size());
         }
         rxWasActive = rxActive;
         for (int batch = 0; rxActive && batch < 8 && usb.available() >= 4; ++batch) {
             const size_t bytes = std::min(size_t(usb.available()), speakerBytes.size()) & ~size_t(3);
             const size_t got = usb.readBytes(speakerBytes.data(), bytes);
-            const int32_t targetLeftGainQ16 = usbSpeakerLeftMuted.load(
-                std::memory_order_acquire)
-                ? 0 : int32_t(usbSpeakerLeftGainQ16.load(std::memory_order_acquire));
-            const int32_t targetRightGainQ16 = usbSpeakerRightMuted.load(
-                std::memory_order_acquire)
-                ? 0 : int32_t(usbSpeakerRightGainQ16.load(std::memory_order_acquire));
             for (size_t i = 0; i + 3 < got; i += 4) {
-                const uint16_t l = sos::get16(speakerBytes.data() + i);
-                const uint16_t r = sos::get16(speakerBytes.data() + i + 2);
-                const int32_t left = l < 32768 ? int32_t(l) : int32_t(l) - 65536;
-                const int32_t right = r < 32768 ? int32_t(r) : int32_t(r) - 65536;
-                speakerLeftGainQ16 = smoothGain(
-                    speakerLeftGainQ16, targetLeftGainQ16);
-                speakerRightGainQ16 = smoothGain(
-                    speakerRightGainQ16, targetRightGainQ16);
-                const int32_t scaledLeft = int32_t(
-                    (int64_t(left) * speakerLeftGainQ16) >> 16);
-                const int32_t scaledRight = int32_t(
-                    (int64_t(right) * speakerRightGainQ16) >> 16);
-                // True stereo downlink: keep the L/R separation the phone sent
-                // instead of folding both channels into one averaged sample.
-                frame.pcm[frameUsed++] = int16_t(scaledLeft);
-                frame.pcm[frameUsed++] = int16_t(scaledRight);
+                frame.pcm[frameUsed++] = int16_t(sos::get16(speakerBytes.data() + i));
+                frame.pcm[frameUsed++] = int16_t(sos::get16(speakerBytes.data() + i + 2));
                 if (frameUsed == frame.pcm.size()) {
                     frame.capturedMs = millis();
                     frame.sequence = captureSequence++;
@@ -202,7 +169,7 @@ void encoderTask(void*) {
     if (opusStatus == OPUS_OK)
         opusStatus = opus_encoder_ctl(opusEncoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
     if (opusStatus != OPUS_OK) {
-        S_PRINTF("Opus encoder initialization failed: %d\n", opusStatus);
+        SERIAL_PRINTF("Opus encoder initialization failed: %d\n", opusStatus);
         if (opusMemory) heap_caps_free(opusMemory);
         statusError.store(true, std::memory_order_relaxed);
         for (;;) vTaskDelay(pdMS_TO_TICKS(1000));

@@ -3,7 +3,6 @@
 #include <Arduino.h>
 #include <esp_arduino_version.h>
 #include <esp32-hal-tinyusb.h>
-#include <atomic>
 #include <cassert>
 #include <cstdint>
 
@@ -55,15 +54,5 @@ extern UsbAudioStream usb;
 #else
 extern audio_tools::USBAudioStream usb;
 #endif
-
-constexpr uint32_t kUsbUnityGainQ16 = 65536;
-extern std::atomic<uint32_t> usbSpeakerLeftGainQ16;
-extern std::atomic<uint32_t> usbSpeakerRightGainQ16;
-extern std::atomic<uint32_t> usbSpeakerLeftMuted;
-extern std::atomic<uint32_t> usbSpeakerRightMuted;
-
-uint32_t usbGainQ16(float volume);
-void onUsbVolume(float volume, uint8_t channel);
-void onUsbMute(bool muted, uint8_t channel);
 
 } // namespace lanmic

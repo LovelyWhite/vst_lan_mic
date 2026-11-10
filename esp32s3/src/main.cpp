@@ -11,8 +11,8 @@
 
 #include "AudioTasks.h"
 #include "DeviceIdentity.h"
-#include "Log.h"
 #include "NetworkTask.h"
+#include "Serial.h"
 #include "Status.h"
 #include "UsbAudio.h"
 
@@ -37,21 +37,22 @@ static_assert(sizeof(encoderTaskStack) == 49152, "Keep the measured encoder stac
 
 using namespace lanmic;
 
+#ifdef LANMIC_ENABLE_SERIAL
+USBCDC USBSerial; // Definition for the extern declaration in Serial.h.
+#endif
+
 void setup() {
-    S_INIT(); // UART bridge, not native USB CDC.
+    // CDC registers first so it owns interfaces 0-1; the audio class follows.
+    SERIAL_INIT();
     pinMode(kStatusLedPin, OUTPUT);
     setStatusLed(false);
-    const auto ledResult = xTaskCreatePinnedToCore(
+    xTaskCreatePinnedToCore(
         statusLedTask, "status-led", 2048, nullptr, 1, nullptr, 0);
-    if (ledResult != pdPASS) {
-        setStatusLed(true);
-        S_PRINTF("Status LED task creation failed\n");
-    }
     void* queueMemory = heap_caps_malloc(
         sizeof(AudioQueues), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!queueMemory) {
         statusError.store(true, std::memory_order_relaxed);
-        S_PRINTF("Audio queues PSRAM allocation failed: need=%u,maxBlock=%u\n",
+        SERIAL_PRINTF("Audio queues PSRAM allocation failed: need=%u,maxBlock=%u\n",
             unsigned(sizeof(AudioQueues)),
             unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
         return;
@@ -85,35 +86,17 @@ void setup() {
     // The descriptor reserves 49 samples, but flow control sends exactly
     // 48 stereo samples (192 bytes) per 1 ms frame at 48 kHz.
     config.enable_ep_in_flow_control = true;
-    // 48 packets absorb stalls that exceeded the old 16-packet FIFO, avoiding
-    // audible IN zero-padding; adds ~32 ms latency and also enlarges bufferRx().
-    config.fifo_packets = 48;
+    config.fifo_packets = 32;
     config.rx_start_fill_percent = 0;
-    // Host volume controls the phone-playback (USB OUT) path in audioTask.
-    // Enabling this library option would instead scale USB IN microphone data.
-    config.volume_active = false;
+    // Audio Tools applies host volume/mute to the downlink in readBytes().
+    // The uplink is fed through bufferTx() and stays untouched.
+    config.volume_active = true;
     config.self_powered = false;
     config.max_power_ma = 250;
     config.begin_usb = true;
-    usb.setReqEntityCallback([](audio_tools::USBAudioDeviceBase* device,
-                                uint8_t,
-                                const audio_tools::UsbSetupPacket& request,
-                                uint8_t*) {
-        const uint8_t entity = audio_tools::u16High(request.wIndex);
-        if (entity != audio_tools::USBAudio2DescriptorBuilder::ENTITY_FU1 ||
-            request.bRequest != audio_tools::kAudioCsReqCur)
-            return true;
-        const uint8_t control = audio_tools::u16High(request.wValue);
-        const uint8_t channel = audio_tools::u16Low(request.wValue);
-        if (control == audio_tools::AUDIO_FU_CTRL_VOLUME)
-            onUsbVolume(device->volume(channel), channel);
-        else if (control == audio_tools::AUDIO_FU_CTRL_MUTE)
-            onUsbMute(device->isMute(channel), channel);
-        return true;
-    });
     if (!usb.begin(config)) {
         statusError.store(true, std::memory_order_relaxed);
-        S_PRINTF("USB audio initialization failed\n");
+        SERIAL_PRINTF("USB audio initialization failed\n");
         return;
     }
     pinMode(kWifiResetPin, INPUT_PULLUP);
@@ -132,10 +115,10 @@ void setup() {
         wifiManager.server->send(302, "text/plain", "");
       });
     });
-    S_PRINTF("Open Wi-Fi provisioning AP: %s\n", provisioningSsid);
+    SERIAL_PRINTF("Open Wi-Fi provisioning AP: %s\n", provisioningSsid);
     if (!wifiManager.autoConnect(provisioningSsid)) {
         statusError.store(true, std::memory_order_relaxed);
-        S_PRINTF("Wi-Fi provisioning failed to start; rebooting\n");
+        SERIAL_PRINTF("Wi-Fi provisioning failed to start; rebooting\n");
         delay(1000);
         ESP.restart();
     }
@@ -144,34 +127,16 @@ void setup() {
     // Wi-Fi modem sleep keeps the IDF default here; audioTask widens it to
     // WIFI_PS_NONE only while USB audio is streaming (see kWifiIdleSleepMs).
     WiFi.setAutoReconnect(true);
-    S_PRINTF("Before audio/network tasks: heap=%u,minHeap=%u,maxBlock=%u\n",
-        unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-        unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-        unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
-    const auto audioResult = xTaskCreatePinnedToCore(
-        audioTask, "sos-audio", 8192, nullptr, 4, nullptr, 0);
+    xTaskCreatePinnedToCore(audioTask, "sos-audio", 8192, nullptr, 4, nullptr, 0);
     // shortcut: initial alloca budgets for 20 ms audio, remeasure high-water marks before changing codec settings.
     // Encoding owns Core 1: under heavy Wi-Fi retransmits the high-priority
     // lwIP tasks would crowd a shared core, slowing encoding and growing
     // raw_trim; networkTask on Core 0 being preempted by audioTask (4) is the
     // safe direction, with both-direction buffers absorbing its jitter.
-    const auto netResult = xTaskCreatePinnedToCore(
-        networkTask, "sos-network", 32768, nullptr, 3, &networkTaskHandle, 0);
+   xTaskCreatePinnedToCore(networkTask, "sos-network", 32768, nullptr, 3, &networkTaskHandle, 0);
     encoderTaskHandle = xTaskCreateStaticPinnedToCore(
-        encoderTask, "sos-encoder", sizeof(encoderTaskStack), nullptr, 3,
+        encoderTask, "sos-encoder", sizeof(encoderTaskStack), nullptr, 2,
         encoderTaskStack, &encoderTaskControl, 1);
-    const BaseType_t encoderResult = encoderTaskHandle ? pdPASS : errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY;
-    if (audioResult != pdPASS || encoderResult != pdPASS || netResult != pdPASS) {
-        statusError.store(true, std::memory_order_relaxed);
-        S_PRINTF("Audio/network task creation failed: audio=%ld,network=%ld,encoder=%ld,"
-                 "heap=%u,minHeap=%u,maxBlock=%u,psramHeap=%u,psramMaxBlock=%u\n",
-            long(audioResult), long(netResult), long(encoderResult),
-            unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-            unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-            unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-            unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)),
-            unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
-    }
 }
 
 void loop() {
@@ -192,12 +157,12 @@ void loop() {
             uint32_t(now - wifiResetPressedMs) >= kWifiResetHoldMs) {
             wifiResetArmed = true;
             statusResetArmed.store(true, std::memory_order_relaxed);
-            S_PRINTF("Wi-Fi reset armed; release BOOT to restart provisioning\n");
+            SERIAL_PRINTF("Wi-Fi reset armed; release BOOT to restart provisioning\n");
         }
     } else {
         wifiResetPressedMs = 0;
         if (wifiResetArmed) {
-            S_PRINTF("Clearing saved Wi-Fi credentials\n");
+            SERIAL_PRINTF("Clearing saved Wi-Fi credentials\n");
             wifiResetInProgress.store(true, std::memory_order_release);
             WiFi.setAutoReconnect(false);
             delay(100);
@@ -205,7 +170,7 @@ void loop() {
             delay(100);
             const bool erased = WiFi.eraseAP();
             WiFi.mode(WIFI_OFF);
-            S_PRINTF("%s\n", erased ? "Saved Wi-Fi credentials cleared" : "Failed to clear saved Wi-Fi credentials");
+            SERIAL_PRINTF("%s\n", erased ? "Saved Wi-Fi credentials cleared" : "Failed to clear saved Wi-Fi credentials");
             delay(250);
             ESP.restart();
         }
