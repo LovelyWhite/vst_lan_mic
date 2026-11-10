@@ -24,13 +24,13 @@ constexpr uint32_t kMaxCapturedBacklogFrames = 5;
 AudioQueues* audioQueues = nullptr; // PSRAM, initialized before any audio task starts.
 // Encoder task is the only producer, networkTask is the only consumer.
 sos::SpscRing<EncodedFrame, 16> encodedDownlink;
+sos::SpscRing<CapturedFrame, 8> captured;
 std::atomic<uint32_t> uplinkEpoch{0}, lastUplinkMs{0};
 std::atomic<uint32_t> downlinkEpoch{0}, downlinkReceiverActive{0};
 TaskHandle_t encoderTaskHandle = nullptr, networkTaskHandle = nullptr;
 
 void audioTask(void*) {
     auto& microphone = audioQueues->microphone;
-    auto& captured = audioQueues->captured;
     Pacer pacer{1000};
     uint32_t epoch = uplinkEpoch.load();
     bool txWasActive = false, rxWasActive = false, uplinkWasFresh = false;
@@ -53,22 +53,23 @@ void audioTask(void*) {
             if (wifiModemSleeping) {
                 wifiModemSleeping = false;
                 WiFi.setSleep(false);
-                SERIAL_PRINTF("WiFi active\n");
+                SERIAL_PRINTF("[D] WiFi active\n");
             }
         } else if (!wifiModemSleeping &&
                    uint32_t(millis() - lastStreamActiveMs) >= kWifiIdleSleepMs) {
             WiFi.setSleep(true);
             wifiModemSleeping = true;
-            SERIAL_PRINTF("WiFi sleep\n");
+            SERIAL_PRINTF("[D] WiFi sleep\n");
         }
         const auto newEpoch = uplinkEpoch.load(std::memory_order_acquire);
-        const bool fresh = uint32_t(millis() - lastUplinkMs.load()) < sos::kAudioTimeoutMs;
+        const bool fresh = uint32_t(millis() - lastUplinkMs.load(std::memory_order_acquire)) <
+                           sos::kAudioTimeoutMs;
         if (newEpoch != epoch || txActive != txWasActive || (uplinkWasFresh && !fresh)) {
             microphone.reset();
             epoch = newEpoch;
         }
         if (txActive != txWasActive)
-            SERIAL_PRINTF("USB tx %s\n", txActive ? "active" : "idle");
+            SERIAL_PRINTF("[D] USB tx %s\n", txActive ? "active" : "idle");
         txWasActive = txActive;
         uplinkWasFresh = fresh;
 
@@ -103,7 +104,7 @@ void audioTask(void*) {
         }
 
         if (rxActive != rxWasActive) {
-            SERIAL_PRINTF("USB rx %s\n", rxActive ? "active" : "idle");
+            SERIAL_PRINTF("[D] USB rx %s\n", rxActive ? "active" : "idle");
             frameUsed = 0;
             // Only this task consumes bufferRx(). The cap is required: while the
             // host keeps streaming, the ISR refills faster than this drains, so an
@@ -143,7 +144,6 @@ void audioTask(void*) {
 }
 
 void encoderTask(void*) {
-    auto& captured = audioQueues->captured;
     // Keep the large frame buffers off the task stack; Opus encode itself
     // still needs stack headroom for its internal scratch work.
     static CapturedFrame input;
@@ -169,7 +169,7 @@ void encoderTask(void*) {
     if (opusStatus == OPUS_OK)
         opusStatus = opus_encoder_ctl(opusEncoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
     if (opusStatus != OPUS_OK) {
-        SERIAL_PRINTF("Opus encoder initialization failed: %d\n", opusStatus);
+        SERIAL_PRINTF("[D] Opus encoder initialization failed: %d\n", opusStatus);
         if (opusMemory) heap_caps_free(opusMemory);
         statusError.store(true, std::memory_order_relaxed);
         for (;;) vTaskDelay(pdMS_TO_TICKS(1000));

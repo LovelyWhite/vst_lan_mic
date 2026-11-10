@@ -52,7 +52,7 @@ void setup() {
         sizeof(AudioQueues), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!queueMemory) {
         statusError.store(true, std::memory_order_relaxed);
-        SERIAL_PRINTF("Audio queues PSRAM allocation failed: need=%u,maxBlock=%u\n",
+        SERIAL_PRINTF("[D] Audio queues PSRAM allocation failed: need=%u,maxBlock=%u\n",
             unsigned(sizeof(AudioQueues)),
             unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
         return;
@@ -96,7 +96,7 @@ void setup() {
     config.begin_usb = true;
     if (!usb.begin(config)) {
         statusError.store(true, std::memory_order_relaxed);
-        SERIAL_PRINTF("USB audio initialization failed\n");
+        SERIAL_PRINTF("[D] USB audio initialization failed\n");
         return;
     }
     pinMode(kWifiResetPin, INPUT_PULLUP);
@@ -115,10 +115,10 @@ void setup() {
         wifiManager.server->send(302, "text/plain", "");
       });
     });
-    SERIAL_PRINTF("Open Wi-Fi provisioning AP: %s\n", provisioningSsid);
+    SERIAL_PRINTF("[D] Open Wi-Fi provisioning AP: %s\n", provisioningSsid);
     if (!wifiManager.autoConnect(provisioningSsid)) {
         statusError.store(true, std::memory_order_relaxed);
-        SERIAL_PRINTF("Wi-Fi provisioning failed to start; rebooting\n");
+        SERIAL_PRINTF("[D] Wi-Fi provisioning failed to start; rebooting\n");
         delay(1000);
         ESP.restart();
     }
@@ -157,12 +157,12 @@ void loop() {
             uint32_t(now - wifiResetPressedMs) >= kWifiResetHoldMs) {
             wifiResetArmed = true;
             statusResetArmed.store(true, std::memory_order_relaxed);
-            SERIAL_PRINTF("Wi-Fi reset armed; release BOOT to restart provisioning\n");
+            SERIAL_PRINTF("[D] Wi-Fi reset armed; release BOOT to restart provisioning\n");
         }
     } else {
         wifiResetPressedMs = 0;
         if (wifiResetArmed) {
-            SERIAL_PRINTF("Clearing saved Wi-Fi credentials\n");
+            SERIAL_PRINTF("[D] Clearing saved Wi-Fi credentials\n");
             wifiResetInProgress.store(true, std::memory_order_release);
             WiFi.setAutoReconnect(false);
             delay(100);
@@ -170,7 +170,7 @@ void loop() {
             delay(100);
             const bool erased = WiFi.eraseAP();
             WiFi.mode(WIFI_OFF);
-            SERIAL_PRINTF("%s\n", erased ? "Saved Wi-Fi credentials cleared" : "Failed to clear saved Wi-Fi credentials");
+            SERIAL_PRINTF("[D] %s\n", erased ? "Saved Wi-Fi credentials cleared" : "Failed to clear saved Wi-Fi credentials");
             delay(250);
             ESP.restart();
         }
