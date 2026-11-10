@@ -2,14 +2,12 @@
 
 #include <WiFi.h>
 #include <esp_heap_caps.h>
-#include <esp_timer.h>
 #include <opus.h>
 #include <algorithm>
 #include <array>
 
 #include "Log.h"
 #include "Pacer.h"
-#include "Stats.h"
 #include "Status.h"
 #include "UsbAudio.h"
 
@@ -33,7 +31,7 @@ AudioQueues* audioQueues = nullptr; // PSRAM, initialized before any audio task 
 sos::SpscRing<EncodedFrame, 16> encodedDownlink;
 std::atomic<uint32_t> uplinkEpoch{0}, lastUplinkMs{0};
 std::atomic<uint32_t> downlinkEpoch{0}, downlinkReceiverActive{0};
-TaskHandle_t audioTaskHandle = nullptr, encoderTaskHandle = nullptr, networkTaskHandle = nullptr; // For the 1 Hz stack high-water query
+TaskHandle_t encoderTaskHandle = nullptr, networkTaskHandle = nullptr;
 
 void audioTask(void*) {
     auto& microphone = audioQueues->microphone;
@@ -45,7 +43,6 @@ void audioTask(void*) {
     static CapturedFrame frame;
     size_t frameUsed = 0;
     uint32_t captureSequence = 0;
-    uint32_t lastCapturedMs = millis();
     uint32_t lastStreamActiveMs = 0;
     bool wifiModemSleeping = true; // IDF default while associated.
     std::array<uint8_t, 192> speakerBytes{};
@@ -62,7 +59,6 @@ void audioTask(void*) {
         return current + step;
     };
     for (;;) {
-        const int64_t audioLoopStartUs = esp_timer_get_time(); // Pass start, for work-time stats only.
         const uint32_t audioLoopNow = millis();
         // isStreamingActiveTx() can stay false on ESP32-S3 despite live ISO-IN.
         // Use the ISR completion counter, which advances once per millisecond.
@@ -84,13 +80,11 @@ void audioTask(void*) {
             if (wifiModemSleeping) {
                 wifiModemSleeping = false;
                 WiFi.setSleep(false);
-                ++stats.wifiSleepToggles;
             }
         } else if (!wifiModemSleeping &&
                    uint32_t(millis() - lastStreamActiveMs) >= kWifiIdleSleepMs) {
             WiFi.setSleep(true);
             wifiModemSleeping = true;
-            ++stats.wifiSleepToggles;
         }
         const auto newEpoch = uplinkEpoch.load(std::memory_order_acquire);
         const bool fresh = uint32_t(millis() - lastUplinkMs.load()) < sos::kAudioTimeoutMs;
@@ -106,11 +100,6 @@ void audioTask(void*) {
         // because of the unreliable TX-active flag. This task is the only writer;
         // the ISR only drains, so checked free space cannot shrink before writing.
         if (txActive) {
-            // Track writable space: min shows how full the FIFO stayed, max
-            // shows whether it ever approached empty during this window.
-            const int32_t txFree = int32_t(usb.availableForWrite());
-            statsMin(stats.usbTxFifoMinFree, txFree);
-            statsMax(stats.usbTxFifoMaxFree, txFree);
             microphone.prepare();
             for (int batch = 0; batch < 8 &&
                  usb.availableForWrite() >= int(sizeof(micSamples)); ++batch) {
@@ -132,7 +121,6 @@ void audioTask(void*) {
 
         if (rxActive != rxWasActive) {
             frameUsed = 0;
-            lastCapturedMs = millis();
             // Only this task consumes bufferRx().
             while (usb.available() > 0)
                 usb.readBytes(speakerBytes.data(), speakerBytes.size());
@@ -166,16 +154,10 @@ void audioTask(void*) {
                 frame.pcm[frameUsed++] = int16_t(scaledRight);
                 if (frameUsed == frame.pcm.size()) {
                     frame.capturedMs = millis();
-                    statsMax(stats.captureGapMaxMs, uint32_t(frame.capturedMs - lastCapturedMs));
-                    lastCapturedMs = frame.capturedMs;
-                    ++stats.capturedFrames;
                     frame.sequence = captureSequence++;
                     if (!downlinkReceiverActive.load(std::memory_order_acquire)) {
                         // Don't buffer raw PCM with no receiver, so recovery never sends stale audio.
-                    } else if (!captured.push(&frame, 1)) {
-                        ++stats.queuePushFail;
-                        ++stats.rawPushFail;
-                    } else if (encoderTaskHandle) {
+                    } else if (captured.push(&frame, 1) && encoderTaskHandle) {
                         // Event-driven downlink: enqueue wakes encoderTask, which
                         // wakes networkTask to send after encoding, keeping Opus
                         // encode out of the network task.
@@ -189,13 +171,7 @@ void audioTask(void*) {
         // slows to 200 Hz, adding at most 5 ms to start-of-stream detection,
         // which the 300 ms network playout buffer hides.
         pacer.setPeriodUs((txActive || rxActive) ? 1000 : 5000);
-        // Loop work time only (pacer sleep excluded): the max shows how close
-        // a pass comes to the 1 ms period budget.
-        statsMax(stats.audioLoopMaxUs,
-                 uint32_t(esp_timer_get_time() - audioLoopStartUs));
         pacer.wait();
-        stats.audioPacerOverrun.store(pacer.overrun, std::memory_order_relaxed);
-        stats.audioPacerAnchor.store(pacer.anchor, std::memory_order_relaxed);
     }
 }
 
@@ -206,7 +182,6 @@ void encoderTask(void*) {
     static CapturedFrame input;
     static EncodedFrame output;
     uint32_t epoch = downlinkEpoch.load(std::memory_order_acquire);
-    uint32_t lastEncodedMs = millis();
 
     const int opusEncoderBytes = opus_encoder_get_size(sos::kOpusChannels);
     // Keep the complete encoder state in internal RAM; do not fall back to PSRAM.
@@ -240,15 +215,11 @@ void encoderTask(void*) {
             epoch = nextEpoch;
             captured.clear();
             opus_encoder_ctl(opusEncoder, OPUS_RESET_STATE);
-            lastEncodedMs = millis();
         }
 
         const uint32_t backlog = captured.size();
-        stats.rawQueued.store(backlog, std::memory_order_relaxed);
         if (backlog > kMaxCapturedBacklogFrames) {
-            const uint32_t trim = backlog - kMaxCapturedBacklogFrames;
-            captured.discard(trim);
-            stats.rawTrimFrames.fetch_add(trim, std::memory_order_relaxed);
+            captured.discard(backlog - kMaxCapturedBacklogFrames);
         }
 
         if (!captured.pop(input)) {
@@ -256,31 +227,15 @@ void encoderTask(void*) {
             continue;
         }
 
-        statsMax(stats.encodeWaitMaxMs, uint32_t(millis() - input.capturedMs));
-        const int64_t encodeStartUs = esp_timer_get_time();
         const int encoded = opus_encode(
             opusEncoder, input.pcm.data(), int(sos::kOpusFrameSamples),
             output.payload.data(), int(output.payload.size()));
-        const uint32_t encodeUs = uint32_t(esp_timer_get_time() - encodeStartUs);
-        statsMax(stats.netEncodeMaxUs, encodeUs);
-        stats.encodeWorkUs.fetch_add(encodeUs, std::memory_order_relaxed);
-        if (encoded <= 0) {
-            ++stats.encodeErrors;
-            stats.lastEncodeError.store(encoded, std::memory_order_relaxed);
-            continue;
-        }
+        if (encoded <= 0) continue;
 
-        output.encodedMs = millis();
-        statsMax(stats.encodeGapMaxMs, uint32_t(output.encodedMs - lastEncodedMs));
-        lastEncodedMs = output.encodedMs;
-        ++stats.encodedFrames;
         output.capturedMs = input.capturedMs;
         output.sequence = input.sequence;
         output.payloadBytes = uint16_t(encoded);
-        if (!encodedDownlink.push(&output, 1)) {
-            ++stats.queuePushFail;
-            ++stats.encodedPushFail;
-        }
+        encodedDownlink.push(&output, 1);
         if (networkTaskHandle) xTaskNotifyGive(networkTaskHandle);
     }
 }

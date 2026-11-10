@@ -3,7 +3,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
-#include <esp_timer.h>
 #include <opus.h>
 #include <algorithm>
 #include <array>
@@ -14,7 +13,6 @@
 #include "Log.h"
 #include "NonBlockingUdp.h"
 #include "Pacer.h"
-#include "Stats.h"
 #include "Status.h"
 
 namespace lanmic {
@@ -77,10 +75,7 @@ void networkTask(void*) {
     uint32_t lastRetry = 0, lastValidAudio = 0;
     uint32_t nextDownlinkAttemptMs = 0;
     uint32_t downlinkBackoffMs = 10;
-    uint32_t lastSentMs = millis();
-    uint32_t lastDiagnosticsMs = 0, diagnosticsSequence = 0;
     bool socketsReady = false;
-    bool notified = false; // True when the last waitNotify woke on an enqueue notification (lets the consumer detect the empty-queue race).
     EncodedFrame pendingDownlink;
     IPAddress boundIp, currentIp;
     std::array<uint8_t, sos::kMaxPacketSize + 1> packet{};
@@ -113,7 +108,6 @@ void networkTask(void*) {
         uplinkSequenceValid = false;
         plcPending = 0;
         heldPayloadBytes = 0;
-        ++stats.uplinkResets;
         opus_decoder_ctl(opusDecoder, OPUS_RESET_STATE);
     };
 
@@ -125,7 +119,6 @@ void networkTask(void*) {
                 resetUplink(); // Also drops the frame staged behind it.
                 return;
             }
-            stats.plcFrames.fetch_add(1, std::memory_order_relaxed);
             microphone.push(decoded);
             --plcPending;
         }
@@ -151,20 +144,16 @@ void networkTask(void*) {
         receiver = Peer{};
     };
     for (;;) {
-        const int64_t netLoopStartUs = esp_timer_get_time(); // Pass start, for work-time stats only.
         if (wifiResetInProgress.load(std::memory_order_acquire)) {
             if (socketsReady) {
                 control.stop();
                 audio.stop();
                 socketsReady = false;
             }
-            statsMax(stats.netLoopMaxUs,
-                     uint32_t(esp_timer_get_time() - netLoopStartUs));
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
         const uint32_t now = millis();
-        int64_t netPhaseStartUs = esp_timer_get_time();
         const bool wifiConnected =
             wifiSnapshotConnected.load(std::memory_order_acquire) != 0;
         currentIp = IPAddress(wifiSnapshotIpRaw.load(std::memory_order_acquire));
@@ -181,8 +170,6 @@ void networkTask(void*) {
             socketsReady = controlBound && audioBound;
             if (!socketsReady) {
                 control.stop(); audio.stop();
-                statsMax(stats.netLoopMaxUs,
-                         uint32_t(esp_timer_get_time() - netLoopStartUs));
                 vTaskDelay(pdMS_TO_TICKS(100));
                 continue;
             }
@@ -192,15 +179,11 @@ void networkTask(void*) {
 
         if (sender.port && !sender.active(now)) invalidateSender();
         if (receiver.port && !receiver.active(now)) invalidateReceiver();
-        statsMax(stats.netStateMaxUs,
-                 uint32_t(esp_timer_get_time() - netPhaseStartUs));
 
         if (socketsReady) {
-            netPhaseStartUs = esp_timer_get_time();
             for (int n = 0; n < kMaxControlPacketsPerNetLoop; ++n) {
                 const int got = control.read(packet.data(), packet.size(), received);
                 if (got < 0) {
-                    ++stats.controlReadReset;
                     resetSockets();
                     break;
                 }
@@ -241,20 +224,11 @@ void networkTask(void*) {
                 }
                 const auto bytes = sos::encode(packet.data(), reply);
                 const auto sent = control.sendTo(ip, port, packet.data(), bytes);
-                if (sent == NonBlockingUdp::SendResult::Error) {
-                    ++stats.udpEndPacketFail;
-                    ++stats.controlSendReset;
-                    stats.controlSendErrno.store(control.lastError(),
-                                                 std::memory_order_relaxed);
-                    break;
-                }
+                if (sent == NonBlockingUdp::SendResult::Error) break;
             }
-            statsMax(stats.netControlMaxUs,
-                     uint32_t(esp_timer_get_time() - netPhaseStartUs));
         }
 
         if (socketsReady) {
-            netPhaseStartUs = esp_timer_get_time();
             // Concealment left over from an earlier pass goes out first so its
             // frames stay ahead of the real frame staged behind them.
             emitPlc();
@@ -262,7 +236,6 @@ void networkTask(void*) {
                 if (heldPayloadBytes == 0) {
                     const int got = audio.read(audioPacket.data(), audioPacket.size(), received);
                     if (got < 0) {
-                        ++stats.audioReadReset;
                         resetSockets();
                         break;
                     }
@@ -306,16 +279,11 @@ void networkTask(void*) {
                 lastValidAudio = now;
                 lastUplinkMs.store(now, std::memory_order_release);
             }
-            const uint32_t receiveUs = uint32_t(esp_timer_get_time() - netPhaseStartUs);
-            statsMax(stats.netAudioRxMaxUs, receiveUs);
-            stats.receiveWorkUs.fetch_add(receiveUs, std::memory_order_relaxed);
         }
 
         // Catch up at 4 ms per packet; WouldBlock retains the head for backoff.
         // Trim only excess backlog to bound latency without dropping every older frame.
         // Notifications wake bounded batches; 5 ms polling covers coalesced notifications.
-        // queuePopFail counts only notified-but-empty races, not normal queue draining.
-        netPhaseStartUs = esp_timer_get_time();
         const uint32_t attemptNow = millis();
         if (!socketsReady || !receiver.active(attemptNow)) {
             downlinkReceiverActive.store(0, std::memory_order_release);
@@ -323,15 +291,10 @@ void networkTask(void*) {
             ulTaskNotifyTake(pdTRUE, 0); // Clear stale notifications after frame drops to avoid an empty wakeup.
             nextDownlinkAttemptMs = attemptNow;
             downlinkBackoffMs = 10;
-            lastSentMs = attemptNow;
-        } else if (notified && encodedDownlink.size() == 0) {
-            ++stats.queuePopFail;
         } else {
             const uint32_t encodedBacklog = encodedDownlink.size();
             if (encodedBacklog > kMaxEncodedBacklogFrames) {
-                const uint32_t trim = encodedBacklog - kMaxEncodedBacklogFrames;
-                encodedDownlink.discard(trim);
-                stats.encodedTrimFrames.fetch_add(trim, std::memory_order_relaxed);
+                encodedDownlink.discard(encodedBacklog - kMaxEncodedBacklogFrames);
             }
             for (int n = 0; n < kMaxDownlinkFramesPerNetLoop; ++n) {
                 const uint32_t sendNow = millis();
@@ -344,34 +307,14 @@ void networkTask(void*) {
                 memcpy(packet.data() + sos::kHeaderSize,
                        pendingDownlink.payload.data(),
                        pendingDownlink.payloadBytes);
-                const int64_t downlinkStepUs = esp_timer_get_time();
                 const auto sent = audio.sendTo(receiver.ip, receiver.port,
                                                packet.data(), bytes);
-                statsMax(stats.netSendMaxUs,
-                         uint32_t(esp_timer_get_time() - downlinkStepUs));
                 if (sent == NonBlockingUdp::SendResult::Sent) {
-                    const uint32_t sentMs = millis();
-                    statsMax(stats.sendGapMaxMs, uint32_t(sentMs - lastSentMs));
-                    statsMax(stats.sendWaitMaxMs, uint32_t(sentMs - pendingDownlink.encodedMs));
-                    statsMax(stats.sendAgeMaxMs, uint32_t(sentMs - pendingDownlink.capturedMs));
-                    lastSentMs = sentMs;
-                    ++stats.sentFrames;
                     encodedDownlink.discard(1);
                     downlinkBackoffMs = 10;
                     nextDownlinkAttemptMs = sendNow + 4;
                 } else {
-                    if (sent == NonBlockingUdp::SendResult::Error) {
-                        ++stats.udpEndPacketFail;
-                        ++stats.downlinkSendReset;
-                        stats.downlinkSendErrno.store(audio.lastError(),
-                                                      std::memory_order_relaxed);
-                        invalidateReceiver();
-                    } else {
-                        ++stats.downlinkSendWouldBlock;
-                        // Frame was pending and the socket refused it: the
-                        // meaning diagnostics report as pollBlocked.
-                        ++stats.downlinkPollBlocked;
-                    }
+                    if (sent == NonBlockingUdp::SendResult::Error) invalidateReceiver();
                     nextDownlinkAttemptMs = sendNow + downlinkBackoffMs;
                     downlinkBackoffMs =
                         std::min(downlinkBackoffMs * 2, uint32_t(100));
@@ -379,44 +322,9 @@ void networkTask(void*) {
                 }
             }
         }
-        statsMax(stats.netDownlinkMaxUs,
-                 uint32_t(esp_timer_get_time() - netPhaseStartUs));
-        const uint32_t diagnosticsNow = millis();
-        if (socketsReady && receiver.active(diagnosticsNow) &&
-            uint32_t(diagnosticsNow - lastDiagnosticsMs) >= 1000) {
-            lastDiagnosticsMs = diagnosticsNow;
-            const sos::DeviceDiagnostics diagnostics{
-                stats.capturedFrames.load(std::memory_order_relaxed),
-                stats.encodedFrames.load(std::memory_order_relaxed),
-                stats.sentFrames.load(std::memory_order_relaxed),
-                stats.rawPushFail.load(std::memory_order_relaxed),
-                stats.encodedPushFail.load(std::memory_order_relaxed),
-                stats.rawTrimFrames.load(std::memory_order_relaxed),
-                stats.encodedTrimFrames.load(std::memory_order_relaxed),
-                stats.encodeErrors.load(std::memory_order_relaxed),
-                stats.downlinkSendWouldBlock.load(std::memory_order_relaxed),
-                stats.downlinkPollBlocked.load(std::memory_order_relaxed),
-                stats.plcFrames.load(std::memory_order_relaxed),
-                stats.receiveWorkUs.load(std::memory_order_relaxed),
-                stats.encodeWorkUs.load(std::memory_order_relaxed),
-                stats.rawQueued.load(std::memory_order_relaxed), encodedDownlink.size(),
-                wifiSnapshotRssi.load(std::memory_order_relaxed)};
-            const sos::Header h{sos::Kind::Diagnostics, 0, bootSession,
-                                diagnosticsSequence++, diagnosticsNow,
-                                uint16_t(sos::kDiagnosticsBytes)};
-            const auto bytes = sos::encode(packet.data(), h);
-            sos::encodeDiagnostics(packet.data() + sos::kHeaderSize, diagnostics);
-            // Best effort after audio: no retry, lease reset, or audio error accounting.
-            control.sendTo(receiver.ip, receiver.port, packet.data(), bytes);
-        }
         // Poll at 5 ms while bound, 50 ms otherwise; notifications can wake sooner.
         pacer.setPeriodUs(socketsReady ? 5000 : 50000);
-        // Loop work time only (pacer/backoff sleeps excluded).
-        statsMax(stats.netLoopMaxUs,
-                 uint32_t(esp_timer_get_time() - netLoopStartUs));
-        notified = pacer.waitNotify();
-        stats.netPacerOverrun.store(pacer.overrun, std::memory_order_relaxed);
-        stats.netPacerAnchor.store(pacer.anchor, std::memory_order_relaxed);
+        pacer.waitNotify();
     }
 }
 

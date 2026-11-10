@@ -18,9 +18,6 @@ juce::String normalizedDeviceIdentity(const juce::String& value) {
     number = number.substring(number.length() - 6);
     return juce::String(sos::kDeviceName) + "-" + number;
 }
-// Compile-time switch: append a 1 Hz status/diagnostics line to
-// Documents/LANMIC/lanmic-{send,return}-*.log. Set to false to disable.
-constexpr bool kFileLogEnabled = false;
 constexpr uint32_t kMaxPlcFrames = 300 / sos::kOpusFrameDurationMs;
 constexpr uint32_t kMaxOutgoingAgeMs = 300;
 constexpr uint32_t kMaxOutgoingBacklogFrames = 32;
@@ -83,68 +80,6 @@ void Transport::enqueue(const sos::OpusFrame& pcm, uint32_t now) {
 
 void Transport::invalidateAudio() { ++audioEpoch_; }
 
-juce::String Transport::receiveDiagnostics() const {
-    auto text = "RX=" + juce::String(receivePackets_.load(std::memory_order_relaxed))
-        + " | buffer=" + juce::String(receiveBufferedMs_.load(std::memory_order_relaxed)) + " ms"
-        + " | PLC=" + juce::String(receivePlc_.load(std::memory_order_relaxed))
-        + " | late=" + juce::String(receiveLate_.load(std::memory_order_relaxed))
-        + "\nunderrun=" + juce::String(incoming_.underruns.load(std::memory_order_relaxed))
-        + " | trim=" + juce::String(incoming_.trims.load(std::memory_order_relaxed))
-        + " | overflow=" + juce::String(incoming_.overflows.load(std::memory_order_relaxed))
-        + " | decode_err=" + juce::String(receiveDecodeErrors_.load(std::memory_order_relaxed));
-    sos::DeviceDiagnostics d, p;
-    bool haveDiagnostics;
-    uint32_t receivedAt, window;
-    {
-        const juce::ScopedLock lock(settingsLock_);
-        d = deviceDiagnostics_;
-        p = previousDeviceDiagnostics_;
-        haveDiagnostics = haveDeviceDiagnostics_;
-        receivedAt = deviceDiagnosticsAtMs_;
-        window = deviceDiagnosticsWindowMs_;
-    }
-    if (!haveDiagnostics)
-        return text + "\nESP: waiting for diagnostics (requires updated firmware)";
-    const uint32_t age = nowMs() - receivedAt;
-    text += "\nESP age=" + juce::String(age) + " ms"
-        + (age >= 3000 ? " [STALE]" : "")
-        + " | RSSI=" + juce::String(d.rssiDbm) + " dBm";
-    if (window == 0)
-        return text + "\nESP: waiting for next sample to calculate deltas";
-    text += "\nESP deltas / " + juce::String(window) + " ms:"
-        + " cap=" + juce::String(uint32_t(d.captured - p.captured))
-        + " | enc=" + juce::String(uint32_t(d.encoded - p.encoded))
-        + " | sent=" + juce::String(uint32_t(d.sent - p.sent));
-    text += "\nraw_drop=" + juce::String(uint32_t(d.rawDrop - p.rawDrop))
-        + " | enc_drop=" + juce::String(uint32_t(d.encodedDrop - p.encodedDrop))
-        + " | raw_trim=" + juce::String(uint32_t(d.rawTrim - p.rawTrim))
-        + " | enc_trim=" + juce::String(uint32_t(d.encodedTrim - p.encodedTrim));
-    text += "\nenc_err=" + juce::String(uint32_t(d.encodeErrors - p.encodeErrors))
-        + " | wouldblock=" + juce::String(uint32_t(d.sendWouldBlock - p.sendWouldBlock))
-        + " | poll_blocked=" + juce::String(uint32_t(d.pollBlocked - p.pollBlocked))
-        + " | UL_PLC=" + juce::String(uint32_t(d.uplinkPlc - p.uplinkPlc));
-    text += "\nRX work=" + juce::String(double(uint32_t(d.receiveWorkUs - p.receiveWorkUs)) / 1000.0, 1)
-        + " ms | ENC work=" + juce::String(double(uint32_t(d.encodeWorkUs - p.encodeWorkUs)) / 1000.0, 1)
-        + " ms (wall time, includes preemption)";
-    text += "\nQueue snapshot: raw=" + juce::String(d.rawQueued)
-        + " | enc=" + juce::String(d.encodedQueued);
-    return text;
-}
-
-void Transport::resetDiagnostics() {
-    // Editor-thread writes race the network thread's fetch_add on display-only
-    // counters; a lost increment here is not worth a lock.
-    receivePackets_.store(0, std::memory_order_relaxed);
-    receivePlc_.store(0, std::memory_order_relaxed);
-    receiveLate_.store(0, std::memory_order_relaxed);
-    receiveDecodeErrors_.store(0, std::memory_order_relaxed);
-    incoming_.resetCounters();
-    const juce::ScopedLock lock(settingsLock_);
-    // Rebase on the last sample so the next report opens a fresh delta window.
-    previousDeviceDiagnostics_ = deviceDiagnostics_;
-    deviceDiagnosticsWindowMs_ = 0;
-}
-
 void Transport::prepareReceive() {
     const auto epoch = audioEpoch_.load(std::memory_order_acquire);
     if (epoch != consumedEpoch_) {
@@ -152,15 +87,9 @@ void Transport::prepareReceive() {
         consumedEpoch_ = epoch;
     }
     incoming_.prepare();
-    // Read queue occupancy on its consumer thread, not from the editor.
-    receiveBufferedMs_.store(
-        incoming_.queue.size() * 1000u / (sos::kSampleRate * sos::kOpusChannels),
-        std::memory_order_relaxed);
 }
 
 void Transport::run() {
-    juce::File logFile; // Resolved on first write; survives reconnects.
-    uint32_t lastLogMs = 0;
     int codecStatus = OPUS_OK;
     OpusDecoder* decoder = sending_
         ? nullptr
@@ -243,11 +172,6 @@ void Transport::run() {
             if (decoder) opus_decoder_ctl(decoder, OPUS_RESET_STATE);
             if (encoder) opus_encoder_ctl(encoder, OPUS_RESET_STATE);
         };
-        auto clearDiagnostics = [&] {
-            const juce::ScopedLock lock(settingsLock_);
-            haveDeviceDiagnostics_ = false;
-            deviceDiagnosticsWindowMs_ = 0;
-        };
         auto clearPeer = [&] {
             outgoing_.clear();
             peerIp.clear();
@@ -257,7 +181,6 @@ void Transport::run() {
             state_ = State::Searching;
             resetStreamState();
             invalidateAudio();
-            clearDiagnostics();
             const juce::ScopedLock lock(settingsLock_);
             selected_.clear();
         };
@@ -308,23 +231,6 @@ void Transport::run() {
 
         while (!threadShouldExit()) {
             const auto now = nowMs();
-            if constexpr (kFileLogEnabled) {
-                if (uint32_t(now - lastLogMs) >= 1000) {
-                    lastLogMs = now;
-                    if (logFile == juce::File()) {
-                        auto dir = juce::File::getSpecialLocation(
-                            juce::File::userDocumentsDirectory).getChildFile("LANMIC");
-                        dir.createDirectory();
-                        logFile = dir.getNonexistentChildFile(
-                            sending_ ? "lanmic-send" : "lanmic-return", "log");
-                    }
-                    auto line = juce::Time::getCurrentTime().formatted("%Y-%m-%d %H:%M:%S ")
-                        + status();
-                    if (!sending_)
-                        line += " | " + receiveDiagnostics().replaceCharacter('\n', ' ');
-                    logFile.appendText(line + "\n");
-                }
-            }
             const bool enabled = enabled_.load(std::memory_order_acquire);
             const auto newVersion = preferenceVersion_.load();
             if (newVersion != version) {
@@ -338,7 +244,6 @@ void Transport::run() {
                 haveAck = haveAudio = false;
                 resetStreamState();
                 invalidateAudio();
-                clearDiagnostics();
                 state_ = peerIp.isEmpty() ? State::Searching : State::Connecting;
                 selectedAt = now;
                 lastSubscribe = now - 1000;
@@ -424,41 +329,15 @@ void Transport::run() {
                     if (busy && state_.load() != State::Busy) {
                         resetStreamState();
                         invalidateAudio();
-                        clearDiagnostics();
                     }
                     state_ = busy ? State::Busy : State::Connected;
                 } else if (!sending_ && enabled && connected() &&
-                           h.kind == sos::Kind::Diagnostics &&
-                           source == peerIp && port == sos::kDiscoveryPort &&
-                           h.session == peerBoot) {
-                    sos::DeviceDiagnostics diagnostics;
-                    if (!sos::decodeDiagnostics(packet.data() + sos::kHeaderSize,
-                                               h.payloadBytes, diagnostics))
-                        continue;
-                    const juce::ScopedLock lock(settingsLock_);
-                    if (haveDeviceDiagnostics_) {
-                        const uint32_t advance = h.sequence - deviceDiagnosticsSequence_;
-                        if (advance == 0 || advance >= 0x80000000u) continue;
-                    }
-                    const uint32_t window = h.timestampMs - deviceDiagnosticsTimestampMs_;
-                    // Long outages start a new baseline instead of displaying ambiguous counter wraps.
-                    deviceDiagnosticsWindowMs_ =
-                        haveDeviceDiagnostics_ && window > 0 && window <= 10000 ? window : 0;
-                    previousDeviceDiagnostics_ = deviceDiagnostics_;
-                    deviceDiagnostics_ = diagnostics;
-                    deviceDiagnosticsTimestampMs_ = h.timestampMs;
-                    deviceDiagnosticsSequence_ = h.sequence;
-                    deviceDiagnosticsAtMs_ = nowMs();
-                    haveDeviceDiagnostics_ = true;
-                } else if (!sending_ && enabled && connected() &&
                            h.kind == sos::Kind::AudioOpus &&
                            source == peerIp && port == sos::kUplinkPort && h.session == peerBoot) {
-                    receivePackets_.fetch_add(1, std::memory_order_relaxed);
                     uint32_t gap = 0;
                     if (sequenceValid) {
                         gap = h.sequence - nextSequence;
                         if (gap >= 0x80000000u) {
-                            receiveLate_.fetch_add(1, std::memory_order_relaxed);
                             continue; // Duplicate or late packet.
                         }
                     }
@@ -477,7 +356,6 @@ void Transport::run() {
                             decodeOk = false;
                             break;
                         }
-                        receivePlc_.fetch_add(1, std::memory_order_relaxed);
                         if (!incoming_.queue.push(decoded.data(),
                                 uint32_t(samples) * sos::kOpusChannels)) {
                             incoming_.overflows.fetch_add(1, std::memory_order_relaxed);
@@ -490,7 +368,6 @@ void Transport::run() {
                                       int(sos::kOpusFrameSamples), 0)
                         : OPUS_INTERNAL_ERROR;
                     if (samples != int(sos::kOpusFrameSamples)) {
-                        receiveDecodeErrors_.fetch_add(1, std::memory_order_relaxed);
                         resetStreamState();
                         invalidateAudio();
                         continue;

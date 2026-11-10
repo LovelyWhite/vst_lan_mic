@@ -16,7 +16,6 @@ extern std::atomic<bool> statusResetArmed;
 extern std::atomic<bool> statusError;
 extern std::atomic<uint32_t> wifiSnapshotConnected;
 extern std::atomic<uint32_t> wifiSnapshotIpRaw;
-extern std::atomic<int32_t> wifiSnapshotRssi;
 
 void setStatusLed(bool on);
 void refreshWifiSnapshot();

@@ -13,7 +13,6 @@
 #include "DeviceIdentity.h"
 #include "Log.h"
 #include "NetworkTask.h"
-#include "Stats.h"
 #include "Status.h"
 #include "UsbAudio.h"
 
@@ -150,7 +149,7 @@ void setup() {
         unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
         unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
     const auto audioResult = xTaskCreatePinnedToCore(
-        audioTask, "sos-audio", 8192, nullptr, 4, &audioTaskHandle, 0);
+        audioTask, "sos-audio", 8192, nullptr, 4, nullptr, 0);
     // shortcut: initial alloca budgets for 20 ms audio, remeasure high-water marks before changing codec settings.
     // Encoding owns Core 1: under heavy Wi-Fi retransmits the high-priority
     // lwIP tasks would crowd a shared core, slowing encoding and growing
@@ -211,13 +210,4 @@ void loop() {
             ESP.restart();
         }
     }
-
-#ifdef LANMIC_ENABLE_SERIAL
-    // Skip stack scans and counter exchanges entirely in silent builds.
-    static uint32_t lastStatsMs = 0;
-    if (uint32_t(now - lastStatsMs) >= 1000) {
-        lastStatsMs = now;
-        printStatsLine();
-    }
-#endif
 }

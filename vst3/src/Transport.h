@@ -14,9 +14,6 @@ public:
     void setPreferredDevice(const juce::String&);
     juce::String preferredDevice() const;
     juce::String status() const;
-    juce::String receiveDiagnostics() const;
-    // Zeroes the return-path counters and restarts the ESP delta window.
-    void resetDiagnostics();
     std::vector<Device> devices() const;
     void enqueue(const sos::OpusFrame&, uint32_t now);
     void setReceiveSampleRate(double outputRate) {
@@ -48,13 +45,7 @@ private:
     uint32_t consumedEpoch_ = 0; // Audio-thread owned.
     sos::SpscRing<Outgoing, 64> outgoing_;
     sos::StereoPlayout incoming_; // Downlink arrives as interleaved stereo.
-    std::atomic<uint32_t> receivePackets_{0}, receivePlc_{0}, receiveLate_{0};
-    std::atomic<uint32_t> receiveDecodeErrors_{0}, receiveBufferedMs_{0};
     mutable juce::CriticalSection settingsLock_;
-    sos::DeviceDiagnostics deviceDiagnostics_{}, previousDeviceDiagnostics_{};
-    bool haveDeviceDiagnostics_ = false;
-    uint32_t deviceDiagnosticsAtMs_ = 0, deviceDiagnosticsTimestampMs_ = 0;
-    uint32_t deviceDiagnosticsSequence_ = 0, deviceDiagnosticsWindowMs_ = 0;
     juce::String preferred_, selected_;
     std::vector<Device> devices_;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Transport)

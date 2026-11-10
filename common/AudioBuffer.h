@@ -91,7 +91,9 @@ public:
     static_assert(target + kOpusFrameSamples * uint32_t(Channels) < queueCapacity,
                   "Playout queue is too small");
     SpscRing<int16_t, queueCapacity> queue;
-    std::atomic<uint32_t> underruns{0}, trims{0}, overflows{0};
+    // Functional backpressure signal: prepare() trims when it differs from
+    // handledOverflows_; not a display counter.
+    std::atomic<uint32_t> overflows{0};
 
     // Pushes one whole Opus frame. The size check keeps a frame built for the
     // other channel count from being queued half-at-a-time, which would play
@@ -114,14 +116,6 @@ public:
         for (int ch = 0; ch < Channels; ++ch) previous_[ch] = 0;
         fade_ = 0;
     }
-    // Zeroes the counters without dropping queued audio. handledOverflows_ must
-    // follow overflows, or the next prepare() trims on a stale mismatch.
-    void resetCounters() {
-        underruns.store(0, std::memory_order_relaxed);
-        trims.store(0, std::memory_order_relaxed);
-        overflows.store(0, std::memory_order_relaxed);
-        handledOverflows_ = 0;
-    }
     void prepare() {
         const auto size = queue.size();
         const auto overflowCount = overflows.load(std::memory_order_relaxed);
@@ -131,7 +125,6 @@ public:
             const auto discard = (size - target) / Channels * Channels;
             queue.discard(discard);
             primed_ = false;
-            ++trims;
         }
         handledOverflows_ = overflowCount;
         const float correction = std::max(-maxRateCorrection,
@@ -175,7 +168,6 @@ public:
                 if (!queue.pop(b_[ch])) starved = true;
             if (starved) {
                 primed_ = false;
-                ++underruns;
                 break;
             }
         }

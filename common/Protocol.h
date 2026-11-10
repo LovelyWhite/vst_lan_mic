@@ -23,14 +23,12 @@ constexpr int kOpusBitrate = 192000;
 constexpr size_t kOpusMaxBytes = 512;
 constexpr size_t kHeaderSize = 28;
 constexpr size_t kMaxPacketSize = kHeaderSize + kOpusMaxBytes;
-constexpr size_t kDiagnosticsBytes = 64;
 constexpr uint32_t kLeaseMs = 3500;
 constexpr uint32_t kAudioTimeoutMs = 500;
 constexpr const char* kDeviceName = "LAN MIC";
 
 enum class Kind : uint8_t {
-    Discover = 1, Offer = 2, Subscribe = 3, Ack = 4, AudioOpus = 6,
-    Diagnostics = 7
+    Discover = 1, Offer = 2, Subscribe = 3, Ack = 4, AudioOpus = 6
 };
 enum Role : uint16_t { Sender = 1, Receiver = 2, Busy = 0x8000 };
 
@@ -45,49 +43,6 @@ inline void put16(uint8_t* p, uint16_t v) {
 }
 inline void put32(uint8_t* p, uint32_t v) {
     put16(p, uint16_t(v)); put16(p + 2, uint16_t(v >> 16));
-}
-
-struct DeviceDiagnostics {
-    uint32_t captured = 0, encoded = 0, sent = 0;
-    uint32_t rawDrop = 0, encodedDrop = 0, rawTrim = 0, encodedTrim = 0;
-    uint32_t encodeErrors = 0, sendWouldBlock = 0, pollBlocked = 0, uplinkPlc = 0;
-    // Cumulative wall time, including preemption; these are not CPU-time counters.
-    uint32_t receiveWorkUs = 0, encodeWorkUs = 0;
-    uint32_t rawQueued = 0, encodedQueued = 0;
-    int32_t rssiDbm = -128;
-};
-
-inline void encodeDiagnostics(uint8_t* p, const DeviceDiagnostics& d) {
-    put32(p, d.captured);
-    put32(p + 4, d.encoded);
-    put32(p + 8, d.sent);
-    put32(p + 12, d.rawDrop);
-    put32(p + 16, d.encodedDrop);
-    put32(p + 20, d.rawTrim);
-    put32(p + 24, d.encodedTrim);
-    put32(p + 28, d.encodeErrors);
-    put32(p + 32, d.sendWouldBlock);
-    put32(p + 36, d.pollBlocked);
-    put32(p + 40, d.uplinkPlc);
-    put32(p + 44, d.receiveWorkUs);
-    put32(p + 48, d.encodeWorkUs);
-    put32(p + 52, d.rawQueued);
-    put32(p + 56, d.encodedQueued);
-    put32(p + 60, uint32_t(d.rssiDbm));
-}
-
-inline bool decodeDiagnostics(const uint8_t* p, size_t size, DeviceDiagnostics& d) {
-    if (size != kDiagnosticsBytes) return false;
-    const uint32_t rawRssi = get32(p + 60);
-    const int64_t rssi = rawRssi <= 0x7fffffffu
-        ? int64_t(rawRssi) : int64_t(rawRssi) - 0x100000000LL;
-    if (rssi < -128 || rssi > 0) return false;
-    d = {get32(p), get32(p + 4), get32(p + 8),
-         get32(p + 12), get32(p + 16), get32(p + 20), get32(p + 24),
-         get32(p + 28), get32(p + 32), get32(p + 36), get32(p + 40),
-         get32(p + 44), get32(p + 48), get32(p + 52), get32(p + 56),
-         int32_t(rssi)};
-    return true;
 }
 
 struct Header {
@@ -117,7 +72,7 @@ inline bool decode(const uint8_t* p, size_t size, Header& h) {
     if (size < kHeaderSize || size > kMaxPacketSize ||
         get32(p) != kMagic || p[4] != kVersion ||
         get32(p + 20) != kSampleRate || get16(p + 26) != 0 ||
-        p[5] < uint8_t(Kind::Discover) || p[5] > uint8_t(Kind::Diagnostics))
+        p[5] < uint8_t(Kind::Discover) || p[5] > uint8_t(Kind::AudioOpus))
         return false;
     h = {Kind(p[5]), get16(p + 6), get32(p + 8), get32(p + 12),
          get32(p + 16), get16(p + 24)};
@@ -126,9 +81,6 @@ inline bool decode(const uint8_t* p, size_t size, Header& h) {
         case Kind::AudioOpus:
             return h.flags == 0 && h.session != 0 &&
                    h.payloadBytes > 0 && h.payloadBytes <= kOpusMaxBytes;
-        case Kind::Diagnostics:
-            return h.flags == 0 && h.session != 0 &&
-                   h.payloadBytes == kDiagnosticsBytes;
         case Kind::Offer:
             return h.flags == 0 && h.session != 0 &&
                    h.payloadBytes > 0 && h.payloadBytes <= 64;

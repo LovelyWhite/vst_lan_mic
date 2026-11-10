@@ -11,9 +11,6 @@ constexpr int kControlHeight = 30;
 constexpr int kRowGap = 10;
 constexpr int kToggleHeight = 28;
 constexpr int kStatusHeight = 26;
-constexpr int kDiagGap = 18;   // deliberate breathing room below the status pill
-constexpr int kDiagBar = 22;
-constexpr int kDiagPanel = 150;
 constexpr int kFooterHeight = 18;
 constexpr int kFooterBlock = kRowGap + kFooterHeight;
 // Single source of truth: resized() consumes these terms in this same order.
@@ -25,35 +22,14 @@ constexpr int kBaseHeight = 2 * kMargin + kTitleHeight + kDirectionHeight + kHea
 
 const juce::Colour kBackground{0xff141a21};
 const juce::Colour kPanel{0xff1e2831};
-const juce::Colour kInset{0xff0f151b};
 const juce::Colour kBorder{0xff2d3b46};
 const juce::Colour kAccent{0xff45cbb7};
 const juce::Colour kText{0xffe9eff3};
 const juce::Colour kMuted{0xff8ea2ad};
-
-int windowHeightFor(bool diagnosticsOpen) {
-    if constexpr (BridgeProcessor::sending) {
-        juce::ignoreUnused(diagnosticsOpen);
-        return kBaseHeight + kFooterBlock;
-    } else {
-        return kBaseHeight + kFooterBlock
-             + (diagnosticsOpen ? kDiagGap + kDiagBar + kRowGap + kDiagPanel : 0);
-    }
-}
-
-// Three level bars sharing a baseline. ShapeButton scales it to fit the button.
-juce::Path diagnosticsIcon() {
-    juce::Path path;
-    path.addRectangle(0.00f, 7.0f, 2.5f, 5.0f);
-    path.addRectangle(4.75f, 2.0f, 2.5f, 10.0f);
-    path.addRectangle(9.50f, 5.0f, 2.5f, 7.0f);
-    return path;
-}
 } // namespace
 
 BridgeEditor::BridgeEditor(BridgeProcessor& processor)
-    : AudioProcessorEditor(processor), processor_(processor),
-      diagnosticsToggle_("Diagnostics", kMuted, kAccent, kAccent) {
+    : AudioProcessorEditor(processor), processor_(processor) {
     setOpaque(true);
     // Colour-only skin, so the device popup and the tooltips match the panel.
     skin_.setColour(juce::PopupMenu::backgroundColourId, kPanel);
@@ -104,36 +80,6 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
     enabled_.setColour(juce::ToggleButton::tickColourId, kAccent);
     enabled_.setColour(juce::ToggleButton::tickDisabledColourId, kBorder);
 
-    diagnostics_.setFont(juce::FontOptions(12.0f));
-    diagnostics_.setJustificationType(juce::Justification::topLeft);
-    diagnostics_.setColour(juce::Label::textColourId, kMuted);
-    diagnostics_.setTooltip(
-        "Return-path counters since the last Clear. "
-        "late includes duplicate packets; buffer is sampled by the audio callback. "
-        "ESP counters are deltas over the displayed device window, not lifetime totals. "
-        "RX/ENC work is elapsed wall time including preemption, not CPU usage. "
-        "Queue sizes are snapshots; STALE means no diagnostic update for 3 seconds.");
-
-    // Icon-only disclosure button; ShapeButton paints the shape, never the text.
-    diagnosticsToggle_.setShape(diagnosticsIcon(), false, true, false);
-    diagnosticsToggle_.setBorderSize(juce::BorderSize<int>(3));
-    diagnosticsToggle_.setOnColours(kAccent, kAccent, kAccent);
-    diagnosticsToggle_.shouldUseOnColours(true);
-    diagnosticsToggle_.setTooltip("Show or hide the return-path counters.");
-    diagnosticsToggle_.onClick = [this] {
-        diagnosticsOpen_ = !diagnosticsOpen_;
-        applyDiagnosticsVisibility();
-    };
-    clearDiagnostics_.setColour(juce::TextButton::buttonColourId, kPanel);
-    clearDiagnostics_.setColour(juce::TextButton::textColourOffId, kMuted);
-    clearDiagnostics_.setColour(juce::TextButton::textColourOnId, kText);
-    clearDiagnostics_.setTooltip(
-        "Zero the return-path counters and rebase the ESP delta window on the last sample.");
-    clearDiagnostics_.onClick = [this] {
-        processor_.network.resetDiagnostics();
-        timerCallback();
-    };
-
     credit_.setFont(juce::FontOptions(11.0f), false, juce::Justification::centredRight);
     credit_.setColour(juce::HyperlinkButton::textColourId, kMuted);
     credit_.setTooltip("https://lan-mic.suxitech.cn/");
@@ -145,11 +91,6 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
     addAndMakeVisible(gain_);
     addAndMakeVisible(enabled_);
     addAndMakeVisible(credit_);
-    if constexpr (!BridgeProcessor::sending) {
-        addAndMakeVisible(diagnosticsToggle_);
-        addChildComponent(clearDiagnostics_);
-        addChildComponent(diagnostics_);
-    }
 
     gainAttachment_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         processor.parameters, "gain", gain_);
@@ -160,21 +101,9 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
         processor_.network.setPreferredDevice(index >= 0 && index < deviceIds_.size()
                                                  ? deviceIds_[index] : juce::String{});
     };
-    applyDiagnosticsVisibility();
+    setSize(kWidth, kBaseHeight + kFooterBlock);
     timerCallback();
     startTimerHz(4);
-}
-
-void BridgeEditor::applyDiagnosticsVisibility() {
-    setSize(kWidth, windowHeightFor(diagnosticsOpen_));
-    if constexpr (!BridgeProcessor::sending) {
-        diagnosticsToggle_.setToggleState(diagnosticsOpen_, juce::dontSendNotification);
-        // Not painted; ShapeButton only draws the icon. Screen readers read it.
-        diagnosticsToggle_.setButtonText(diagnosticsOpen_ ? "Hide diagnostics"
-                                                          : "Show diagnostics");
-        clearDiagnostics_.setVisible(diagnosticsOpen_);
-        diagnostics_.setVisible(diagnosticsOpen_);
-    }
 }
 
 void BridgeEditor::paint(juce::Graphics& g) {
@@ -192,14 +121,6 @@ void BridgeEditor::paint(juce::Graphics& g) {
     g.setColour(kBorder);
     g.drawRoundedRectangle(pill.reduced(0.5f), 8.0f, 1.0f);
 
-    if (diagnosticsOpen_) {
-        const auto box = diagnosticsBox_.toFloat();
-        g.setColour(kInset);
-        g.fillRoundedRectangle(box, 8.0f);
-        g.setColour(kBorder);
-        g.drawRoundedRectangle(box.reduced(0.5f), 8.0f, 1.0f);
-    }
-
     g.setColour(kAccent);
     g.fillRect(0, 0, bounds.getWidth(), 3);
 }
@@ -207,10 +128,6 @@ void BridgeEditor::paint(juce::Graphics& g) {
 void BridgeEditor::resized() {
     auto area = getLocalBounds().reduced(kMargin);
     auto titleRow = area.removeFromTop(kTitleHeight);
-    if constexpr (!BridgeProcessor::sending)
-        // Disclosure lives in the top-right corner; closed, the body has no dead row.
-        diagnosticsToggle_.setBounds(titleRow.removeFromRight(kDiagBar)
-                                         .withHeight(kDiagBar));
     title_.setBounds(titleRow);
     direction_.setBounds(area.removeFromTop(kDirectionHeight));
     area.removeFromTop(kHeaderGap);
@@ -226,15 +143,6 @@ void BridgeEditor::resized() {
     enabled_.setBounds(switchRow.removeFromLeft(210));
     area.removeFromTop(kRowGap);
     status_.setBounds(area.removeFromTop(kStatusHeight));
-    if constexpr (!BridgeProcessor::sending) {
-        if (diagnosticsOpen_) {
-            area.removeFromTop(kDiagGap);
-            clearDiagnostics_.setBounds(area.removeFromTop(kDiagBar).removeFromRight(54));
-            area.removeFromTop(kRowGap);
-            diagnosticsBox_ = area.removeFromTop(kDiagPanel);
-            diagnostics_.setBounds(diagnosticsBox_.reduced(12, 10));
-        }
-    }
     area.removeFromTop(kRowGap);
     // The hit area must match the right-aligned text: a full-width row turned
     // the empty space left of the credit into accidental clicks.
@@ -259,8 +167,4 @@ void BridgeEditor::timerCallback() {
     device_.setSelectedId(selected.isEmpty() ? 1 : deviceIds_.indexOf(selected) + 2,
                           juce::dontSendNotification);
     status_.setText(processor_.displayStatus(), juce::dontSendNotification);
-    if constexpr (!BridgeProcessor::sending)
-        if (diagnosticsOpen_)
-            diagnostics_.setText(processor_.network.receiveDiagnostics(),
-                                 juce::dontSendNotification);
 }

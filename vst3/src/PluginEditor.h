@@ -9,21 +9,16 @@ public:
     void resized() override;
 private:
     void timerCallback() override;
-    void applyDiagnosticsVisibility();
     // Declared first: the popup menu and tooltips keep pointing at it while the
     // child components are being torn down.
     juce::LookAndFeel_V4 skin_;
     BridgeProcessor& processor_;
-    juce::Label title_, direction_, deviceLabel_, gainLabel_, status_, diagnostics_;
+    juce::Label title_, direction_, deviceLabel_, gainLabel_, status_;
     juce::ComboBox device_;
     juce::Slider gain_;
     juce::ToggleButton enabled_{"Network enabled"};
-    juce::ShapeButton diagnosticsToggle_;
-    juce::TextButton clearDiagnostics_{"Clear"};
     juce::HyperlinkButton credit_{"@suxitech",
                                   juce::URL{"https://lan-mic.suxitech.cn/"}};
-    bool diagnosticsOpen_ = false;
-    juce::Rectangle<int> diagnosticsBox_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gainAttachment_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> enabledAttachment_;
     juce::StringArray deviceIds_;

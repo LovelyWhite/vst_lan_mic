@@ -14,8 +14,6 @@ constexpr int64_t kTickUs = 1000000 / int64_t(configTICK_RATE_HZ);
 struct Pacer {
   TickType_t periodTicks;
   TickType_t nextTick;
-  // Counter semantics are documented in DebugStats.
-  uint32_t overrun = 0, anchor = 0;
 
   explicit Pacer(int64_t periodUs) {
     periodTicks = usToTicks(periodUs);
@@ -37,8 +35,6 @@ struct Pacer {
       xTaskDelayUntil(&nextTick, periodTicks);
     } else {
       // Already overdue; re-anchor instead of catching up.
-      ++overrun;
-      ++anchor;
       nextTick = now;
     }
   }
@@ -54,7 +50,6 @@ struct Pacer {
       const TickType_t remaining = TickType_t(periodTicks - diff);
       if (ulTaskNotifyTake(pdTRUE, remaining) != 0) {
         // Read the tick after waking; a pre-wait timestamp would drift.
-        ++anchor;
         nextTick = xTaskGetTickCount();
         return true;
       }
@@ -63,8 +58,6 @@ struct Pacer {
       return false;
     }
     // More than a full polling period late (backoff sleep or work overrun mid-loop): re-anchor, no catch-up.
-    ++overrun;
-    ++anchor;
     nextTick = now;
     return false;
   }

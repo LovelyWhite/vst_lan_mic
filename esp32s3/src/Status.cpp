@@ -11,7 +11,6 @@ std::atomic<bool> statusResetArmed{false};
 std::atomic<bool> statusError{false};
 std::atomic<uint32_t> wifiSnapshotConnected{0};
 std::atomic<uint32_t> wifiSnapshotIpRaw{0};
-std::atomic<int32_t> wifiSnapshotRssi{-128};
 
 void setStatusLed(bool on) {
     digitalWrite(kStatusLedPin, on == kStatusLedActiveHigh ? HIGH : LOW);
@@ -22,8 +21,6 @@ void refreshWifiSnapshot() {
     wifiSnapshotConnected.store(connected ? 1u : 0u, std::memory_order_release);
     wifiSnapshotIpRaw.store(connected ? uint32_t(WiFi.localIP()) : 0u,
                             std::memory_order_release);
-    wifiSnapshotRssi.store(connected ? int32_t(WiFi.RSSI()) : -128,
-                           std::memory_order_release);
 }
 
 void statusLedTask(void*) {
