@@ -143,7 +143,7 @@ PCM 播放和采集队列位于 PSRAM；编解码器状态及编码任务静态�
 | 字段 | 含义 |
 | --- | --- |
 | `dev` / `sn` / `ses` | 设备标识 / USB 序列号 / 本次启动会话 ID |
-| `ver` | 固件版本号（单一来源 `common/Version.h`，如 `1.0.2`） |
+| `ver` | 固件版本号（单一来源 `common/Version.h`，如 `1.0.0`） |
 | `up` | 启动至今毫秒数 |
 | `wip` / `wrssi` / `wssid` / `wgw` | 本机 IP / 信号 dBm / 已连接网络 SSID / 网关 |
 | `name` | 设备名称（配网热点名，默认等于设备标识） |
@@ -151,7 +151,7 @@ PCM 播放和采集队列位于 PSRAM；编解码器状态及编码任务静态�
 
 ```text
 > info
-OK|info|LAN MIC-ABCDEF|00112233445566|123|1.0.2|45678|192.168.1.5|-43|mywifi|192.168.1.1|LAN MIC-ABCDEF|1|1
+OK|info|LAN MIC-ABCDEF|00112233445566|123|1.0.0|45678|192.168.1.5|-43|mywifi|192.168.1.1|LAN MIC-ABCDEF|1|1
 > name my-mic
 OKR|name|my-mic
 ```

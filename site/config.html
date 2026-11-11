@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>设备配置 · LAN MIC</title>
-<meta name="description" content="连接 LAN MIC 设备。">
+<title>网页驱动 · LAN MIC</title>
+<meta name="description" content="LAN MIC 网页驱动：浏览器直连设备，查看状态、改名、调通道与固件维护，无需安装驱动。">
 <style>
   :root {
     --bg: #0b0f14; --panel: #141c27; --panel-2: #18222f;
@@ -55,21 +55,32 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   nav .back { font-size: 14px; color: var(--muted); }
   nav .back:hover { color: var(--text); text-decoration: none; }
-  main { padding: 34px 0 64px; }
-  /* .idle sets display, so hidden needs the stronger guard */
+  /* .wrap also matches main/footer, so repeat the class; padding-block keeps its 24px sides */
+  main.wrap { padding-block: 34px 64px; }
+  /* some rules below set display on elements that are also toggled with hidden */
   [hidden] { display: none !important; }
   /* the empty card sits in the middle of the page; browsers without :has() just get it under the nav */
   main:has(#idle:not([hidden])) {
     min-height: calc(100vh - 158px);
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    display: flex; flex-direction: column; justify-content: center;
   }
-  main:has(#idle:not([hidden])) .note { align-self: stretch; }
   .idle {
-    display: flex; align-items: center; justify-content: center;
-    width: min(100%, 460px); min-height: 260px; padding: 40px 20px;
-    text-align: center; border: 1px dashed var(--line); border-radius: var(--radius); color: var(--muted);
+    padding: 30px 22px; margin-bottom: 16px;
+    text-align: center; color: var(--muted); font-size: 13.5px;
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: linear-gradient(180deg, rgba(77, 178, 255, .08), rgba(77, 178, 255, 0)), var(--panel);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 20px 44px -28px rgba(0, 0, 0, .9);
   }
-  .idle b { font-size: 16px; font-weight: 600; color: var(--text); }
+  .idle-icon {
+    display: grid; place-items: center; width: 54px; height: 54px; margin: 0 auto 14px;
+    border-radius: 16px; color: var(--accent);
+    border: 1px solid rgba(77, 178, 255, .3); background: rgba(77, 178, 255, .1);
+  }
+  .idle-icon svg { width: 25px; height: 25px; }
+  .idle b { display: block; margin-bottom: 6px; font-size: 17px; font-weight: 700; color: var(--text); }
+  .idle p { margin-bottom: 18px; }
+  .idle code { font-family: var(--mono); font-size: 12.5px; color: var(--text); }
+  .idle p.idle-tip { margin: 16px 0 0; font-size: 12.5px; color: var(--dim); }
   .card {
     position: relative; overflow: hidden;
     background: linear-gradient(180deg, rgba(255, 255, 255, .035), rgba(255, 255, 255, 0)) , var(--panel);
@@ -100,8 +111,6 @@
   .btn-primary:hover:not(:disabled) { background: var(--grad); filter: brightness(1.08); box-shadow: 0 10px 24px -8px rgba(77, 178, 255, .8); }
   .btn-danger { color: var(--red); border-color: rgba(229, 72, 77, .4); background: rgba(229, 72, 77, .08); }
   .btn-danger:hover:not(:disabled) { color: var(--red); border-color: rgba(229, 72, 77, .6); background: rgba(229, 72, 77, .18); }
-  /* after .btn so its padding wins the cascade */
-  .btn-sm { padding: 6px 13px; font-size: 13px; border-radius: 8px; }
   /* the button whose command is still waiting for the device reply */
   .btn.loading { cursor: progress; }
   .btn.loading:disabled { opacity: 1; }
@@ -158,20 +167,32 @@
     border-radius: 10px; padding: 12px 16px; font-size: 13px; color: var(--muted); margin-bottom: 16px;
   }
   .note.warn { border-color: var(--amber); background: rgba(229, 165, 77, .07); }
+  .steps { margin: 0 0 14px 20px; font-size: 13.5px; color: var(--muted); }
+  .steps li { margin-bottom: 3px; }
+  .steps code { font-family: var(--mono); font-size: 12.5px; color: var(--text); }
+  #flashArea { margin-top: 14px; }
+  esp-web-install-button { display: block; margin: 6px 0 14px; }
+  esp-web-install-button [slot=unsupported], esp-web-install-button [slot=not-allowed] {
+    display: block; margin: 2px 0; padding: 10px 14px; font-size: 13px;
+    color: var(--amber); border: 1px solid rgba(229, 165, 77, .35);
+    border-radius: 10px; background: rgba(229, 165, 77, .08);
+  }
   #banner { animation: rise .18s ease; }
   @keyframes rise { from { opacity: 0; transform: translate(-50%, 8px); } }
   @media (max-width: 560px) {
     nav .back { display: none; }
     .nav-inner { height: auto; padding: 12px 16px; flex-wrap: wrap; row-gap: 8px; }
-    main { padding: 26px 0 48px; }
+    main.wrap { padding-block: 26px 48px; }
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation: none !important; transition: none !important; }
   }
-  footer { padding: 30px 0; color: var(--dim); font-size: 13px; text-align: right; }
+  footer.wrap { padding-block: 30px; color: var(--dim); font-size: 13px; text-align: right; }
   footer a { color: var(--muted); }
   footer a:hover { text-decoration: underline; }
 </style>
+<!-- ESP Web Tools: browser flasher for the ROM download mode, same approach as esp-claw.com/zh-cn/flash -->
+<script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
 </head>
 <body>
 
@@ -179,12 +200,12 @@
   <div class="nav-inner">
     <a class="logo" href="index.html">
       <span class="logo-mark"></span>
-      <span>LAN MIC <small>设备配置</small></span>
+      <span>LAN MIC <small>网页驱动</small></span>
     </a>
     <div class="nav-actions">
       <span class="dot" id="statusDot" title="未连接"></span>
       <span class="dev" id="devName" hidden></span>
-      <button class="btn btn-sm btn-primary" id="btnConn">连接设备</button>
+      <button class="btn btn-primary" id="btnConn">连接设备</button>
       <button class="icon-btn" id="btnRefresh" disabled title="刷新设备信息" aria-label="刷新设备信息">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
       </button>
@@ -201,7 +222,12 @@
   <div id="banner"></div>
 
   <div id="idle" class="idle">
-    <b>请先将 LAN MIC 连接到本设备。</b>
+    <span class="idle-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>
+    </span>
+    <b>还没有连接设备</b>
+    <p>把 LAN MIC 插入电脑的 USB 口，点右上角「连接设备」，在浏览器弹窗中选择 <code>LAN MIC</code>。</p>
+    <p class="idle-tip">列表里没有设备？拔下来重新插入一次，并使用桌面版 Chrome 或 Edge。</p>
   </div>
 
   <div id="panels" hidden>
@@ -237,8 +263,30 @@
       <button class="btn btn-danger" id="btnErase" disabled>清除 WiFi 凭据</button>
       <button class="btn" id="btnReboot" disabled>重启设备</button>
     </div>
-    <p class="hint">只清除设备保存的 WiFi 名称和密码，设备名称与音频通道不受影响；重启后设备重新进入配网</p>
+    <p class="hint">只清除设备保存的 WiFi 名称和密码，设备名称与音频通道不受影响；重启后设备重新进入配网。设备连不上时用下方「更新设备固件」恢复</p>
   </div>
+  </div>
+
+  <!-- firmware updates flash in the ROM download mode, where the device is no longer the
+       serial port this page talks to, so this card stays outside #panels and never
+       disappears; the steps hide themselves once the device reports the latest version -->
+  <div class="card">
+    <h2>更新设备固件</h2>
+    <p class="hint" id="updateTip">连接设备后自动检查版本是否有新固件</p>
+    <div id="flashArea">
+      <ol class="steps">
+        <li>把设备从电脑上拔下来</li>
+        <li>按住设备上的按钮不放</li>
+        <li>保持按住，把设备重新插入电脑</li>
+        <li>点下方「开始更新」，在端口列表里选 <code>USB JTAG/serial debug unit</code></li>
+      </ol>
+      <esp-web-install-button id="flashWidget" manifest="firmware/manifest.json">
+        <button type="button" class="btn btn-primary" slot="activate">开始更新</button>
+        <span slot="unsupported">当前浏览器无法更新固件，请使用桌面版 Chrome 或 Edge 打开本页。</span>
+        <span slot="not-allowed">更新设备固件需要通过 HTTPS 打开本页，请使用 https 地址访问。</span>
+      </esp-web-install-button>
+      <p class="hint">更新会覆盖设备上的程序，WiFi 名称和密码需要重新配置；网页驱动连不上或固件损坏时也可按上面步骤更新</p>
+    </div>
   </div>
 </main>
 
@@ -323,7 +371,7 @@ function setBusy() {
 }
 function setConnected(on) {
   connected = on;
-  if (!on) { port = null; reader = null; buf = ''; queue.length = 0; if (pending) { clearTimeout(pending.timer); pending = null; } $('devName').textContent = ''; fillInfo(); }
+  if (!on) { port = null; reader = null; buf = ''; queue.length = 0; if (pending) { clearTimeout(pending.timer); pending = null; } $('devName').textContent = ''; fillInfo(); devVer = null; paintUpdateCard(); }
   $('statusDot').className = 'dot' + (on ? ' on' : '');
   $('statusDot').title = on ? '已连接' : '未连接';
   $('devName').hidden = !on;
@@ -345,7 +393,7 @@ function pump() {
     return;
   }
   const cmd = line.split(' ')[0];
-  pending = { cmd, timer: setTimeout(() => settle({ cmd, err: '设备无响应，请确认设备已接通并插在本设备上', restart: false, f: [] }), 15000) };
+  pending = { cmd, timer: setTimeout(() => settle({ cmd, err: '设备无响应，请确认设备已插入本机 USB 口', restart: false, f: [] }), 15000) };
   setBusy();
   tx(line);
 }
@@ -423,6 +471,7 @@ function render(r) {
     $('devName').textContent = r.f[9] || r.f[0] || ''; // the card shows the display name
     $('ssidIn').value = r.f[9] || '';
     ep.ein = obj.ein; ep.eout = obj.eout;
+    devVer = obj.ver || null; paintUpdateCard();
     $('chkIn').checked = obj.ein; $('chkOut').checked = obj.eout;
     banner('ok', '设备信息已更新');
     return;
@@ -468,8 +517,9 @@ async function connect() {
   if (!('serial' in navigator)) { $('noSerial').style.display = 'block'; return; }
   try {
     // The manual path always opens the picker: a stale grant from an unplugged
-    // device must not hide the list of devices.
-    port = await navigator.serial.requestPort();
+    // device must not hide the list of devices. The filter narrows the list to
+    // LAN MIC units, so Bluetooth / audio / other serial grants stay out of it.
+    port = await navigator.serial.requestPort({ filters: [LM_FILTER] });
     await port.open({ baudRate: 115200 }); // the device ignores the speed
     afterOpen();
   } catch (e) {
@@ -482,13 +532,35 @@ async function connect() {
 // Auto-reconnect to paired (previously granted) ports: silently on page load
 // and whenever the OS reports a granted device plugged in. A stale grant that
 // fails to open stays quiet -- the manual button still leads to the picker.
+// Skipped while the flasher is up: it re-opens the same port for its console and
+// our write of `port` would race with it. autoBusy keeps two reset-time connect
+// events from opening two grants and orphaning the first handle.
+// Only our own device qualifies: Chrome hands JS the USB ids, never the "LAN MIC-xxxxxx"
+// product string the picker shows, so the ids of the composite descriptor main.cpp
+// builds (audio-tools defaults) are the filter. This drops Bluetooth / debug-console
+// grants and the ROM download-mode port (303A:1001).
+// shortcut: hardcodes 0xCAFE:0x4002; if the firmware ever sets config.vid/pid, this
+// constant and the self-check below must follow, or both paths stop finding the device.
+const LM_FILTER = { usbVendorId: 0xcafe, usbProductId: 0x4002 };
+const isLanMic = (p) => { const i = p.getInfo(); return i.usbVendorId === LM_FILTER.usbVendorId && i.usbProductId === LM_FILTER.usbProductId; };
+let autoBusy = false;
 async function autoConnect() {
-  if (!('serial' in navigator) || port || reader) return;
-  for (const p of await navigator.serial.getPorts()) {
-    try { await p.open({ baudRate: 115200 }); port = p; afterOpen(); return; }
-    catch { /* device not plugged in: try the next grant */ }
-  }
+  if (!('serial' in navigator) || port || reader || autoBusy || flashing()) return;
+  autoBusy = true;
+  try {
+    for (const p of await navigator.serial.getPorts()) {
+      if (!isLanMic(p)) continue;
+      try { await p.open({ baudRate: 115200 }); port = p; afterOpen(); return; }
+      catch { /* device not plugged in: try the next grant */ }
+    }
+  } finally { autoBusy = false; }
 }
+// self-check: our ids pass, another ESP32-S3 port and a nameless grant do not
+(() => {
+  const mk = (v, p) => ({ getInfo: () => ({ usbVendorId: v, usbProductId: p }) });
+  if (!isLanMic(mk(0xcafe, 0x4002)) || isLanMic(mk(0x303a, 0x1001)) || isLanMic(mk(undefined, undefined)))
+    console.error('isLanMic self-check failed');
+})();
 async function disconnect() {
   // setConnected(false) runs from the read loop as soon as cancel() lands and
   // nulls port/reader, so hold the handles first; without close() the browser
@@ -522,6 +594,137 @@ $('chkIn').onchange = applyEp;
 $('chkOut').onchange = applyEp;
 $('btnErase').onclick = () => { if (confirm('清除后当前网络连接会立即断开，设备名称与音频通道不受影响。确定清除设备保存的 WiFi 名称和密码？')) send('erase'); };
 $('btnReboot').onclick = () => { if (confirm('立即重启设备？')) send('reboot'); };
+// "更新设备固件" gate: compare the version published in firmware/manifest.json with the
+// one the device reports in its info reply; both are "vMAJOR.MINOR.PATCH" (Version.h).
+let siteVer = null, devVer = null;
+const cmpVer = (a, b) => {
+  const x = a.replace(/^v/i, '').split('.').map(Number), y = b.replace(/^v/i, '').split('.').map(Number);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] || 0) - (y[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+};
+function paintUpdateCard() {
+  const known = !!(siteVer && devVer);
+  const newer = known && cmpVer(siteVer, devVer) > 0;
+  $('flashArea').hidden = known && !newer;
+  $('updateTip').textContent = !known ? '连接设备后自动检查版本是否有新固件'
+    : newer ? '发现新版本 ' + siteVer + '（设备当前 ' + devVer + '），可按下方步骤更新'
+    : '当前已是最新版本 ' + devVer;
+}
+// self-check for the comparator: numeric, not lexical, v prefix tolerated
+(() => {
+  const pass = cmpVer('v1.0.1', 'v1.0.0') > 0 && cmpVer('v1.10.0', 'v1.9.9') > 0
+            && cmpVer('v1.0.0', 'v1.0.0') === 0 && cmpVer('v1.0.0', 'v1.0.1') < 0;
+  if (!pass) console.error('cmpVer self-check failed');
+})();
+// file:// opens cannot fetch the manifest; siteVer stays null and the manual path remains
+fetch('firmware/manifest.json').then(r => r.json())
+  .then(m => { siteVer = m.version || null; paintUpdateCard(); }).catch(() => {});
+// The flasher opens its own port from a listener on the widget's slot, which fires
+// before any handler on the host, so ours is released in the capture phase: the
+// browser hands out no port while this page still holds one open.
+const flashing = () => !!document.querySelector('ewt-install-dialog');
+$('flashWidget').addEventListener('click', () => { if (connected) disconnect(); }, true);
+// esp-web-tools 10.4.0 calls requestPort() with no arguments, so its picker lists every
+// serial device. Shadow the method for that bare call only -- ours passes its own
+// options and is untouched -- and offer just the ESP32-S3 ROM download-mode unit
+// (USB JTAG/serial debug unit, 303A:1001) that the flasher can actually talk to.
+const JTAG_FILTER = { usbVendorId: 0x303a, usbProductId: 0x1001 };
+if ('serial' in navigator) {
+  const rawRequestPort = navigator.serial.requestPort.bind(navigator.serial);
+  navigator.serial.requestPort = (opts) => rawRequestPort(opts || { filters: [JTAG_FILTER] });
+}
+// esp-web-tools removes its dialog when the user closes it, which is also when it
+// lets go of the port -- only then is an auto-reconnect safe again.
+new MutationObserver(() => { if (!flashing()) autoConnect(); })
+  .observe(document.body, { childList: true });
+// ---------- esp-web-tools dialog localization ----------
+// esp-web-tools 10.4.0 is English-only with no i18n hook, so translate the shadow
+// DOM text of its dialogs after every render; serial console log lines are left
+// in English on purpose (they come from the flashing library at runtime).
+(() => {
+  const ZH = {
+    'Connect': '连接', 'Close': '关闭', 'Skip': '跳过', 'Back': '返回', 'Next': '下一步',
+    'Install': '安装', 'Update': '更新', 'Erase device': '擦除设备', 'Error': '错误',
+    'Connecting': '正在连接', 'Connecting...': '正在连接...',
+    'Preparing installation': '正在准备安装', 'Preparing installation...': '正在准备安装...',
+    'Installation prepared': '安装准备完成', 'Erasing': '正在擦除', 'Installing': '正在安装',
+    'Wrapping up': '正在完成', 'Installation complete!': '安装完成！', 'Installation failed': '安装失败',
+    'Logs': '日志', 'Logs & Console': '日志与终端', 'Download Logs': '下载日志',
+    'Reset Device': '重置设备', 'Visit Device': '访问设备',
+    'Add to Home Assistant': '添加到 Home Assistant',
+    'Change Wi-Fi': '更改 Wi-Fi', 'Connect to Wi-Fi': '连接 Wi-Fi', 'Configure Wi-Fi': '配置 Wi-Fi',
+    'Erase User Data': '清除用户数据', 'Fund Development': '支持开发',
+    'Network Name': '网络名称', 'Network': '网络', 'Password': '密码',
+    'Scanning for networks': '正在扫描网络', 'Trying to connect': '正在尝试连接',
+    'Connect attempt successful.': '连接成功。', 'Device connected to the network!': '设备已连接到网络！',
+    'Keep this page visible to prevent slow down': '请保持本页可见，以免安装变慢',
+    'Do you want to erase the device before installing': '安装前是否先擦除设备',
+    'All data on the device will be erased.': '设备上的所有数据将被清除。',
+    'Failed to connect with the device': '无法连接设备', 'Unable to connect': '无法连接',
+    'Terminal disconnected': '终端已断开',
+    // "No port selected" dialog; keys are whitespace-normalised, links and chip names stay as is
+    'No port selected': '未选择串口',
+    "If you didn't select a port because you didn't see your device listed, try the following steps:": '如果没选串口是因为列表里看不到设备，请依次检查：',
+    'Make sure that the device is connected to this computer (the one that runs the browser that shows this website)': '确认设备已插入这台电脑（即打开本页所在的电脑）',
+    'Most devices have a tiny light when it is powered on. If yours has one, make sure it is on.': '多数设备通电后有小指示灯，如果有的话确认它是亮着的。',
+    'Make sure that the USB cable you use can be used for data and is not a power-only cable.': '确认设备与电脑之间走的是数据连接，而不是只供电的连接。',
+    'Make sure you have the right drivers installed. Below are the drivers for common chips used in ESP devices:': '确认已安装正确的驱动，ESP 设备常用芯片的驱动如下：',
+    'CP2102 drivers:': 'CP2102 驱动：',
+    'CH342, CH343, CH9102 drivers:': 'CH342、CH343、CH9102 驱动：',
+    'CH340, CH341 drivers:': 'CH340、CH341 驱动：',
+    '(download via blue button with': '（点蓝色按钮的', 'icon)': '图标下载）',
+    'Cancel': '取消', 'Try Again': '重试',
+  };
+  // "This will take about a minute." etc. keeps the English duration, prefix-only match
+  const zhFor = (s) => ZH[s] || (/^This will take\b/.test(s) ? '预计需要几分钟' : s);
+  function tr(root) {
+    const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = w.nextNode())) {
+      // lit templates break sentences across source lines, so match on collapsed whitespace
+      const s = n.nodeValue.replace(/\s+/g, ' ').trim();
+      if (s) { const t = zhFor(s); if (t !== s) n.nodeValue = t; }
+    }
+    for (const el of root.querySelectorAll('[label]')) {
+      const t = ZH[el.getAttribute('label')];
+      if (t) el.setAttribute('label', t); // material fields render label from this attribute
+    }
+  }
+  function watch(el) {
+    if (el.__zh || !el.updateComplete) return;
+    el.__zh = 1;
+    el.updateComplete.then(() => {
+      const sr = el.shadowRoot;
+      if (!sr) return;
+      tr(sr);
+      new MutationObserver(() => tr(sr))
+        .observe(sr, { childList: true, subtree: true, characterData: true, attributes: true });
+    });
+  }
+  // the flash dialog is created and appended to <body> when flashing starts
+  new MutationObserver((recs) => {
+    for (const r of recs) for (const el of r.addedNodes)
+      if (el.nodeType === 1 && el.tagName.startsWith('EWT-')) watch(el);
+  }).observe(document.body, { childList: true, subtree: true });
+  for (const el of document.body.querySelectorAll('ewt-install-dialog')) watch(el);
+  // self-check on a detached tree: text node, label attribute and a source-wrapped sentence
+  (() => {
+    const d = document.createElement('div');
+    d.textContent = 'Installation complete!';
+    const f = document.createElement('i');
+    f.setAttribute('label', 'Network Name');
+    const p = document.createElement('p');
+    p.textContent = "If you didn't select a port because you didn't see your device\n      listed, try the following steps:";
+    d.append(f, p);
+    tr(d);
+    if (d.firstChild.nodeValue !== '安装完成！' || f.getAttribute('label') !== '网络名称'
+        || p.textContent !== '如果没选串口是因为列表里看不到设备，请依次检查：')
+      console.error('esp-web-tools zh self-check failed');
+  })();
+})();
 fillInfo();
 if (!('serial' in navigator)) {
   $('noSerial').style.display = 'block';

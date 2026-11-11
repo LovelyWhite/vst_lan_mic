@@ -64,7 +64,15 @@
   .nav-links { margin-left: auto; display: flex; gap: 22px; font-size: 14px; }
   .nav-links a { color: var(--muted); }
   .nav-links a:hover { color: var(--text); text-decoration: none; }
-  @media (max-width: 720px) { .nav-links { display: none; } }
+  @media (max-width: 720px) {
+    .nav-inner { gap: 12px; padding: 0 14px; }
+    .logo { flex: none; }
+    .logo small { display: none; }
+    /* links stay reachable on phones as a horizontal scroller instead of a hamburger */
+    .nav-links { min-width: 0; gap: 14px; overflow-x: auto; scrollbar-width: none; }
+    .nav-links::-webkit-scrollbar { display: none; }
+    .nav-links a { flex: none; white-space: nowrap; font-size: 13px; }
+  }
 
   /* ---------- Hero ---------- */
   .hero {
@@ -124,6 +132,11 @@
     background: rgba(255, 255, 255, .03);
   }
   .btn-ghost:hover { background: rgba(255, 255, 255, .06); }
+  .btn-light {
+    background: rgba(245, 249, 253, .92); color: #0b1119;
+    box-shadow: 0 6px 24px rgba(226, 238, 250, .18);
+  }
+  .btn-light:hover { background: #fff; }
 
   /* ---------- 链路图 ---------- */
   .flow {
@@ -331,7 +344,6 @@
       <a href="#install">安装</a>
       <a href="#led">LED 状态</a>
       <a href="#faq">兼容性</a>
-      <a href="config.html">设备配置</a>
     </div>
   </div>
 </nav>
@@ -339,16 +351,17 @@
 <header class="hero" id="top">
   <div class="wrap">
     <div class="badge"><span class="dot"></span>LAN MIC 设备 · Wi-Fi · VST3 · UAC2</div>
-    <h1>把 DAW 的声卡效果<br><span class="grad">无线输出到手机</span></h1>
+    <h1>把机架 (DAW) 的效果<br><span class="grad">无线输出到手机</span></h1>
     <p class="lead">
       LAN MIC 把手机变成电脑 DAW 的外置 USB 耳麦：
       DAW 里的声音无线上送到手机麦克风，手机播放的声音无线回传到 DAW。
       无需固定 IP，插上即用。
     </p>
     <div class="cta-row">
+      <a class="btn btn-light" href="config.html">网页驱动</a>
       <a class="btn btn-primary" href="https://h5.m.goofish.com/item?forceFlush=1&itemId=1096476773651&hitNativeDetail=true&xy_refer=%7B%22campaignId%22%3A1119%2C%22sceneInfo%22%3A%22share.detail.1096476773651.copy%22%7D&needNotPreGet=true&id=1096476773651&from_kun_share=default&ut_sk=1.ZQ2VoS7bGmgDAMa%2FLCc6E4ua_12431167_1793381458959.copy.detail.1096476773651.2810437150&ownerId=177b80d62c016a902c2539804a5399fa&un=cd04e884960136f8b0ea5e6b515c0e5c&share_crt_v=1&un_site=77&spm=a2159r.13376460.0.0&sp_tk=R1VERlRBV21GdFg%3D&bc_fl_src=share-1041550271227812-2-1&cpp=1&shareurl=true&short_name=h.jg3u1e2&bxsign=scdvNfJ66edHsfoZICTe1GLnLU7hJ_QI_H5kBI8QJKK1IdkbX5tMfyX6Zv8VqSrrIzLbFJKU_XVL4CuVjfLnvEMi6x3XMMz8ttIQafENXT6tgCTwwlZRHq3IB8l3l0Q1shG&tk=GUDFTAWmFtX&app=weixin&wechat_flag=1" target="_blank" rel="noopener">购买设备</a>
       <a class="btn btn-ghost" href="#quickstart">快速开始 →</a>
-      <a class="btn btn-ghost" href="#install">下载vst3插件</a>
+      <a class="btn btn-ghost" href="#install">下载VST3插件</a>
     </div>
 
     <div class="flow">
@@ -529,8 +542,8 @@
         </div>
         <h3>macOS</h3>
         <p>双击 pkg 安装包，向导式安装到系统 VST3 插件目录<br>支持 Intel 与 Apple Silicon</p>
-        <span class="dl-file" id="macFile">LANMIC_1.0.0.pkg</span>
-        <a class="btn btn-primary" id="macDl" href="LANMIC_1.0.0.pkg" download>
+        <span class="dl-file" id="macFile">LANMIC_v1.0.0.pkg</span>
+        <a class="btn btn-primary" id="macDl" href="LANMIC_v1.0.0.pkg" download>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5v8.5M4.2 6.8 8 10.6l3.8-3.8M2.5 14h11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           下载 macOS 版
         </a>
@@ -541,8 +554,8 @@
         </div>
         <h3>Windows</h3>
         <p>双击 exe 安装器，可选「为所有人 / 仅为我」安装<br>到系统 VST3 插件目录</p>
-        <span class="dl-file" id="winFile">LANMIC_Setup_1.0.0.exe</span>
-        <a class="btn btn-primary" id="winDl" href="LANMIC_Setup_1.0.0.exe" download>
+        <span class="dl-file" id="winFile">LANMIC_Setup_v1.0.0.exe</span>
+        <a class="btn btn-primary" id="winDl" href="LANMIC_Setup_v1.0.0.exe" download>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5v8.5M4.2 6.8 8 10.6l3.8-3.8M2.5 14h11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           下载 Windows 版
         </a>
