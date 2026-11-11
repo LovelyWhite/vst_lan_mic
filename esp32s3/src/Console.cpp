@@ -10,6 +10,7 @@
 #include "DeviceIdentity.h"
 #include "Protocol.h"
 #include "Serial.h"
+#include "Version.h"
 
 namespace lanmic {
 
@@ -101,7 +102,7 @@ void printInfo(Print& out, const char* cmd) {
     r.field(identity);
     r.field(usbSerial);
     r.num(bootSession);
-    r.num(sos::kVersion);
+    r.field(LANMIC_VERSION); // product version; sos::kVersion stays the wire protocol id
     r.num(millis());
     if (connected) {
         r.field(WiFi.localIP().toString().c_str());
@@ -173,9 +174,10 @@ void handleLine(Print& out, char* line, Preferences& prefs) {
             return;
         }
         if (isInput) enableEpIn = value; else enableEpOut = value;
-        Reply r{out, "OKR", line};
+        Reply r{out, "OK", line};
         r.boolean(value);
         r.close();
+        out.flush(); // the reply must reach the host before the detach below
     } else if (!strcasecmp(line, "erase")) {
         // Saved Wi-Fi credentials only; the device name and the USB
         // endpoint switches keep their NVS values. Same driver sequence as the
@@ -210,19 +212,24 @@ struct LineInput {
 
     void poll() {
         int c;
+        // No delay in this loop: in.read() is a zero-timeout queue pop, so the
+        // loop exits by itself on an empty queue and never spins. Draining as fast
+        // as possible is required, not an optimisation — a full 256-byte rx_queue
+        // makes USBCDC::_onRX() block in xQueueSend for 100 ms per byte, and that
+        // runs on the "usbd" task, which is also the only thing that feeds the
+        // audio ISO IN transfers. Blocking it stalls the microphone stream.
         while ((c = in.read()) >= 0) {
-            // shortcut: printable ASCII only, a non-ASCII SSID has to be set
-            // from the provisioning web page; revisit if UTF-8 input is needed.
             if (c == '\n' || c == '\r') {
                 buf[len] = '\0';
                 if (len) handleLine(out, buf, prefs);
                 len = 0;
                 dropping = false;
-            } else if (!dropping && c >= ' ' && c <= '~') {
+            } else if (!dropping && ((c >= ' ' && c <= '~') || c >= 0x80)) {
+                // UTF-8 bytes (>= 0x80) pass through so names can hold CJK;
+                // control bytes are still dropped as noise.
                 if (len + 1 < kLineMax) buf[len++] = char(c);
                 else dropping = true;
             }
-            vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
 };
@@ -272,9 +279,11 @@ void consoleTask(void*) {
     LineInput usbInput{USBSerial, cdcSerial, prefs};
     for (;;) {
         usbInput.poll();
-        // 1 s keeps command latency plus a stalled reply well inside the web
-        // page's 15 s timeout; polling an empty CDC RX queue costs nothing.
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // Must stay far shorter than the time it takes to fill the 256-byte
+        // rx_queue, or _onRX() blocks the "usbd" task and stalls audio ISO IN
+        // (see poll()). 50 ms also caps command latency at 50 ms; polling an
+        // empty queue is a zero-timeout pop, so the cost is negligible.
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 

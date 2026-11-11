@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.22)
-project(LAN_MIC_VST3 VERSION 0.1.0 LANGUAGES C CXX)
+# Version lives in common/Version.h alone; the packaging scripts parse it there.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../common/Version.h" LANMIC_VERSION_DEFINE REGEX "^#define LANMIC_VERSION")
+string(REGEX MATCH "\"([0-9][0-9.]*)\"" LANMIC_VERSION_MATCH "${LANMIC_VERSION_DEFINE}")
+project(LAN_MIC_VST3 VERSION "${CMAKE_MATCH_1}" LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

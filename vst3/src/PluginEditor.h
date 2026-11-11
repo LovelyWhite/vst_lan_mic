@@ -1,5 +1,6 @@
 #pragma once
 #include "PluginProcessor.h"
+#include "Version.h"
 
 class BridgeEditor final : public juce::AudioProcessorEditor, private juce::Timer {
 public:
@@ -17,7 +18,7 @@ private:
     juce::ComboBox device_;
     juce::Slider gain_;
     juce::ToggleButton enabled_{"Network enabled"};
-    juce::HyperlinkButton credit_{"@suxitech",
+    juce::HyperlinkButton credit_{"@suxitech v" LANMIC_VERSION,
                                   juce::URL{"https://lan-mic.suxitech.cn/"}};
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gainAttachment_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> enabledAttachment_;

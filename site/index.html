@@ -529,8 +529,8 @@
         </div>
         <h3>macOS</h3>
         <p>双击 pkg 安装包，向导式安装到系统 VST3 插件目录<br>支持 Intel 与 Apple Silicon</p>
-        <span class="dl-file">LANMIC_0.1.1.pkg</span>
-        <a class="btn btn-primary" href="LANMIC_0.1.1.pkg" download>
+        <span class="dl-file" id="macFile">LANMIC_1.0.0.pkg</span>
+        <a class="btn btn-primary" id="macDl" href="LANMIC_1.0.0.pkg" download>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5v8.5M4.2 6.8 8 10.6l3.8-3.8M2.5 14h11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           下载 macOS 版
         </a>
@@ -541,8 +541,8 @@
         </div>
         <h3>Windows</h3>
         <p>双击 exe 安装器，可选「为所有人 / 仅为我」安装<br>到系统 VST3 插件目录</p>
-        <span class="dl-file">LANMIC_Setup_0.1.1.exe</span>
-        <a class="btn btn-primary" href="LANMIC_Setup_0.1.1.exe" download>
+        <span class="dl-file" id="winFile">LANMIC_Setup_1.0.0.exe</span>
+        <a class="btn btn-primary" id="winDl" href="LANMIC_Setup_1.0.0.exe" download>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5v8.5M4.2 6.8 8 10.6l3.8-3.8M2.5 14h11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           下载 Windows 版
         </a>
@@ -618,6 +618,17 @@
     </div>
   </div>
 </footer>
+
+<script>
+// Single place to bump the download version; keep in sync with common/Version.h.
+const LANMIC_VERSION = 'v1.0.0';
+const macFile = 'LANMIC_' + LANMIC_VERSION + '.pkg';
+const winFile = 'LANMIC_Setup_' + LANMIC_VERSION + '.exe';
+document.getElementById('macDl').href = macFile;
+document.getElementById('macFile').textContent = macFile;
+document.getElementById('winDl').href = winFile;
+document.getElementById('winFile').textContent = winFile;
+</script>
 
 </body>
 </html>

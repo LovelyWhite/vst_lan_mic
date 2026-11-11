@@ -230,8 +230,14 @@ void Transport::run() {
                 state_ = State::Connecting;
                 const juce::ScopedLock lock(settingsLock_);
                 selected_ = display + " @ " + source;
-            } else if (source == peerIp && h.session != peerBoot) {
-                clearPeer(); // Reboot: require discovery and a fresh lease.
+            } else if (source == peerIp) {
+                if (h.session != peerBoot) {
+                    clearPeer(); // Reboot: require discovery and a fresh lease.
+                } else {
+                    // Keep the status text in sync with a renamed device.
+                    const juce::ScopedLock lock(settingsLock_);
+                    selected_ = display + " @ " + source;
+                }
             }
             return true;
         };

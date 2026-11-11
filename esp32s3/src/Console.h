@@ -19,5 +19,8 @@ extern bool enableEpIn, enableEpOut;
 
 void loadDeviceConfig();
 void consoleTask(void*);
+// Re-initialize USB audio after an endpoint switch (defined in main.cpp);
+// the host re-enumerates, no reboot needed.
+void restartUsbAudio();
 
 } // namespace lanmic

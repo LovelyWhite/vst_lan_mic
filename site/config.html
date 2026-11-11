@@ -345,7 +345,7 @@ function pump() {
     return;
   }
   const cmd = line.split(' ')[0];
-  pending = { cmd, timer: setTimeout(() => settle({ cmd, err: '设备无响应，请确认设备已接通并插在电脑上', restart: false, f: [] }), 15000) };
+  pending = { cmd, timer: setTimeout(() => settle({ cmd, err: '设备无响应，请确认设备已接通并插在本设备上', restart: false, f: [] }), 15000) };
   setBusy();
   tx(line);
 }
@@ -444,32 +444,49 @@ function render(r) {
   if (cmd === 'reboot') { banner('ok', '设备正在重启，稍后请重新连接'); return; }
 }
 
+// Everything after a successful port.open(): shared by the manual picker and
+// the silent auto-reconnect below, which differ only in how the port is found.
+function afterOpen() {
+  setConnected(true);
+  banner('ok', '已连接，正在获取设备信息…');
+  reader = port.readable.getReader();
+  const dec = new TextDecoder();
+  (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (value) for (const line of takeLines(dec.decode(value, { stream: true }))) onLine(line);
+        if (done) break;
+      }
+    } catch { /* aborted on disconnect */ }
+    finally { try { reader.releaseLock(); } catch {} setConnected(false); }
+  })();
+  send('info');
+}
+
 async function connect() {
   if (!('serial' in navigator)) { $('noSerial').style.display = 'block'; return; }
   try {
-    // Always open the picker: a stale grant from an unplugged device used to be
-    // opened silently here, so the list of devices never showed up.
+    // The manual path always opens the picker: a stale grant from an unplugged
+    // device must not hide the list of devices.
     port = await navigator.serial.requestPort();
     await port.open({ baudRate: 115200 }); // the device ignores the speed
-    setConnected(true);
-    banner('ok', '已连接，正在获取设备信息…');
-    reader = port.readable.getReader();
-    const dec = new TextDecoder();
-    (async () => {
-      try {
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (value) for (const line of takeLines(dec.decode(value, { stream: true }))) onLine(line);
-          if (done) break;
-        }
-      } catch { /* aborted on disconnect */ }
-      finally { try { reader.releaseLock(); } catch {} setConnected(false); }
-    })();
-    send('info');
+    afterOpen();
   } catch (e) {
     // a cancel from the chooser is not an error worth a banner
     if (e.name !== 'NotFoundError') banner('err', '连接失败：' + (e.message || '请重新插入设备后再试一次'));
     setConnected(false);
+  }
+}
+
+// Auto-reconnect to paired (previously granted) ports: silently on page load
+// and whenever the OS reports a granted device plugged in. A stale grant that
+// fails to open stays quiet -- the manual button still leads to the picker.
+async function autoConnect() {
+  if (!('serial' in navigator) || port || reader) return;
+  for (const p of await navigator.serial.getPorts()) {
+    try { await p.open({ baudRate: 115200 }); port = p; afterOpen(); return; }
+    catch { /* device not plugged in: try the next grant */ }
   }
 }
 async function disconnect() {
@@ -486,10 +503,11 @@ $('btnConn').onclick = () => (connected ? disconnect() : connect());
 $('btnRefresh').onclick = () => send('info');
 $('btnSsidSet').onclick = () => {
   const v = $('ssidIn').value.trim();
-  // '|' is the UDP Offer field separator and spaces cannot reach the console
-  // parser, so both are rejected here and in the firmware.
-  if (!/^[\x20-\x7e]{1,32}$/.test(v) || v.includes(' ') || v.includes('|')) {
-    banner('err', '设备名称请填 1–32 位英文或数字，不要包含空格和 |');
+  // '|' is the UDP Offer field separator, rejected here and in the firmware.
+  // The limit is 32 UTF-8 bytes (a CJK name costs 3 bytes per character), so
+  // maxlength alone is not enough; internal spaces are allowed, empty is not.
+  if (!v || v.includes('|') || new TextEncoder().encode(v).length > 32) {
+    banner('err', '设备名称请填 1–32 字节（中文按 3 字节计），不能为空或只含空格，不要包含 |');
     return;
   }
   send('name ' + v);
@@ -505,7 +523,12 @@ $('chkOut').onchange = applyEp;
 $('btnErase').onclick = () => { if (confirm('清除后当前网络连接会立即断开，设备名称与音频通道不受影响。确定清除设备保存的 WiFi 名称和密码？')) send('erase'); };
 $('btnReboot').onclick = () => { if (confirm('立即重启设备？')) send('reboot'); };
 fillInfo();
-if (!('serial' in navigator)) $('noSerial').style.display = 'block';
+if (!('serial' in navigator)) {
+  $('noSerial').style.display = 'block';
+} else {
+  autoConnect(); // paired device already plugged in: connect without a click
+  navigator.serial.addEventListener('connect', autoConnect); // ...or plug it in later
+}
 </script>
 </body>
 </html>

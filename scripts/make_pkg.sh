@@ -47,10 +47,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Version: parsed from project(... VERSION ...) in vst3/CMakeLists.txt by default.
+# Version: parsed from common/Version.h by default.
 if [ -z "$VERSION" ]; then
-    VERSION=$(sed -n 's/^project([^)]*VERSION \([0-9][0-9.]*\).*/\1/p' \
-        "$REPO_ROOT/vst3/CMakeLists.txt" | head -n 1)
+    VERSION=$(sed -n 's/^#define LANMIC_VERSION "\([0-9][0-9.]*\)".*/\1/p' \
+        "$REPO_ROOT/common/Version.h" | head -n 1)
 fi
 [ -n "$VERSION" ] || VERSION="0.1.0"
 
@@ -197,5 +197,12 @@ else
         --package-path "$STAGE" "$OUTPUT"
 fi
 
+# Publish to site/ so index.html's version-built download links find the file.
+SITE_PKG="$REPO_ROOT/site/LANMIC_${VERSION}.pkg"
+if [ ! "$OUTPUT" -ef "$SITE_PKG" ]; then
+    cp -f "$OUTPUT" "$SITE_PKG"
+fi
+
 echo
 echo "安装包已生成: $OUTPUT"
+echo "已复制到官网目录: $SITE_PKG"

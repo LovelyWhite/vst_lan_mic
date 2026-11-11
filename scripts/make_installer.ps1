@@ -6,7 +6,7 @@
 #
 # Notes:
 #   - Without plugin arguments, .vst3 files are found under vst3\build*.
-#   - Version is parsed from project(... VERSION ...) in vst3\CMakeLists.txt by default.
+#   - Version is parsed from common\Version.h by default.
 #   - Output: dist\LANMIC_Setup_<version>.exe
 #
 # Examples:
@@ -27,11 +27,11 @@ $RepoRoot = Split-Path -Parent $ScriptDir
 $Staging = Join-Path $RepoRoot 'dist\win-staging'
 $DistDir = Join-Path $RepoRoot 'dist'
 
-# Version: parsed from CMakeLists by default.
+# Version: parsed from common/Version.h by default.
 if (-not $Version) {
-    $cmake = Join-Path $RepoRoot 'vst3\CMakeLists.txt'
-    if (Test-Path -LiteralPath $cmake) {
-        $m = Select-String -LiteralPath $cmake -Pattern '^\s*project\s*\(.*VERSION\s+([0-9][0-9.]*)' | Select-Object -First 1
+    $verH = Join-Path $RepoRoot 'common\Version.h'
+    if (Test-Path -LiteralPath $verH) {
+        $m = Select-String -LiteralPath $verH -Pattern '^\s*#define\s+LANMIC_VERSION\s+"([0-9][0-9.]*)"' | Select-Object -First 1
         if ($m) { $Version = $m.Matches[0].Groups[1].Value }
     }
 }
@@ -102,5 +102,11 @@ New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
 & $iscc "/DAppVersion=$Version" (Join-Path $ScriptDir 'installer_windows.iss')
 if ($LASTEXITCODE -ne 0) { throw "错误: ISCC 编译失败" }
 
+# Publish to site so index.html's version-built download links find the file.
+$SetupExe = Join-Path $DistDir "LANMIC_Setup_$Version.exe"
+$SiteExe = Join-Path $RepoRoot "site\LANMIC_Setup_$Version.exe"
+Copy-Item -LiteralPath $SetupExe -Destination $SiteExe -Force
+
 Write-Host ""
-Write-Host "安装程序已生成: $(Join-Path $DistDir "LANMIC_Setup_$Version.exe")"
+Write-Host "安装程序已生成: $SetupExe"
+Write-Host "已复制到官网目录: $SiteExe"
