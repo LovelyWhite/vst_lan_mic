@@ -86,10 +86,14 @@ public:
         (targetMs + kOpusFrameDurationMs - 1) / kOpusFrameDurationMs;
     static constexpr uint32_t target =
         targetFrames * kOpusFrameSamples * uint32_t(Channels);
-    static constexpr uint32_t trimMargin =
-        uint32_t(queueCapacity) - target - kOpusFrameSamples * uint32_t(Channels);
+    // Latency bound for the elastic path. The rate correction drains only
+    // ~0.2 samples/ms, so a 300 ms excess needs minutes to recover: without a
+    // high-water trim every network stall ratchets playout latency up for good.
+    static constexpr uint32_t highWater =
+        target + uint32_t(kSampleRate) / 1000 * 150 * uint32_t(Channels);
     static_assert(target + kOpusFrameSamples * uint32_t(Channels) < queueCapacity,
                   "Playout queue is too small");
+    static_assert(highWater < queueCapacity, "High-water trim must leave headroom");
     SpscRing<int16_t, queueCapacity> queue;
     // Functional backpressure signal: prepare() trims when it differs from
     // handledOverflows_; not a display counter.
@@ -120,7 +124,7 @@ public:
         const auto size = queue.size();
         const auto overflowCount = overflows.load(std::memory_order_relaxed);
         if (size > target &&
-            (size > target + trimMargin || overflowCount != handledOverflows_)) {
+            (size > highWater || overflowCount != handledOverflows_)) {
             // Only the consumer trims; retain a priming buffer after producer overflow.
             const auto discard = (size - target) / Channels * Channels;
             queue.discard(discard);
