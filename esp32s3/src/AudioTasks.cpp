@@ -83,12 +83,16 @@ void audioTask(void*) {
                  usb.availableForWrite() >= int(sizeof(micSamples)); ++batch) {
                 if (fresh) {
                     // True stereo uplink: pass the DAW's L/R through to USB IN
-                    // instead of duplicating one channel.
+                    // instead of duplicating one channel. The host input slider
+                    // writes the mic Feature Unit state (patched audio-tools)
+                    // and is applied here, never to the playback volume.
+                    const float gainL = usb.inputGain(1);
+                    const float gainR = usb.inputGain(2);
                     for (size_t i = 0; i < 48; ++i) {
                         float stereo[2];
                         microphone.next(stereo);
-                        micSamples[2 * i] = sos::pcm16(stereo[0]);
-                        micSamples[2 * i + 1] = sos::pcm16(stereo[1]);
+                        micSamples[2 * i] = sos::pcm16(stereo[0] * gainL);
+                        micSamples[2 * i + 1] = sos::pcm16(stereo[1] * gainR);
                     }
                 } else {
                     // Same all-zero frame the per-sample path produced, without
