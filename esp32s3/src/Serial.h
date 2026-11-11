@@ -62,7 +62,7 @@ extern BoundedCdcPrint cdcSerial;
 // "cdc drop 17/116" right after three idle-log lines filled 47 of those 64).
 // Console replies go through cdcSerial explicitly and own the CDC channel.
 #ifdef LANMIC_ENABLE_SERIAL
-  #define SERIAL_PRINTF(...)     Serial.printf(__VA_ARGS__)
+  #define SERIAL_PRINTF(...)     {cdcSerial.printf(__VA_ARGS__); Serial.printf(__VA_ARGS__);}
 #else
   #define SERIAL_PRINTF(...)     ((void)0)
 #endif

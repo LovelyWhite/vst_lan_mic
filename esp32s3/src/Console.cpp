@@ -180,15 +180,18 @@ void handleLine(Print& out, char* line, Preferences& prefs) {
         out.flush(); // the reply must reach the host before the detach below
     } else if (!strcasecmp(line, "erase")) {
         // Saved Wi-Fi credentials only; the device name and the USB
-        // endpoint switches keep their NVS values. Same driver sequence as the
-        // BOOT-button reset in loop(), but there is no immediate reboot here,
-        // so the in-RAM STA config must go too: a later reconnect would store
-        // it back into NVS and the credentials would come alive again.
+        // endpoint switches keep their NVS values. Like the BOOT-button reset in
+        // loop(), but there is no immediate reboot here, so the in-RAM STA config
+        // must go too: a later reconnect would store it back into NVS.
         WiFi.setAutoReconnect(false);
-        if (!WiFi.disconnect(false, true, 1000) || !WiFi.eraseAP()) {
-            replyError(out, line, "Wi-Fi credential erase failed");
-            return;
-        }
+        // eraseAP() and the config-zeroing disconnect both need the STA driver
+        // up, and the provisioning portal runs AP-only (WiFiManager stops STA),
+        // so bring STA up without connecting.
+        WiFi.STA.begin(false);
+        // Not gated on: disconnect() fails when the AP is slower than its 1 s
+        // wait, and eraseAP() == esp_wifi_restore() resets the config anyway.
+        WiFi.disconnect(false, true, 1000);
+        WiFi.eraseAP();
         Reply r{out, "OKR", line};
         r.close();
     } else if (!strcasecmp(line, "reboot")) {
