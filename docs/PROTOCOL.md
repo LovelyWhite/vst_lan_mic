@@ -22,7 +22,7 @@ kind 5 Audio。两个方向现在完全同构：48 kHz、立体声（交错 L/R�
 | 偏移 | 字节 | 字段 | 说明 |
 | --- | --- | --- | --- |
 | 0 | 4 | magic | `0x31534f53`，线上字节为 `SOS1` |
-| 4 | 1 | version | `9` |
+| 4 | 1 | version | `10` |
 | 5 | 1 | kind | 1 Discover、2 Offer、3 Subscribe、4 Ack、6 AudioOpus、7 Diagnostics |
 | 6 | 2 | flags | Sender=1、Receiver=2、Busy=`0x8000` |
 | 8 | 4 | session | 非零会话 ID，Discover 可为零 |
@@ -35,7 +35,8 @@ kind 5 Audio。两个方向现在完全同构：48 kHz、立体声（交错 L/R�
 
 AudioOpus 用于两个音频方向，必须 flags=0，payloadBytes 为 1 至 512。
 两个方向每包都解码为每声道 960 个样本，按 L,R 交错存放（共 1920 个样本）。
-Offer 必须 flags=0，负载为 1 至 64 字节 ASCII 设备身份，不带终止符。
+Offer 必须 flags=0，负载为 1 至 64 字节 ASCII，形如 `设备标识|设备名称`，不带终止符；
+两个字段都不含 `|`，以第一个 `|` 分界。
 Discover、Subscribe、Ack 无负载。接收方拒绝错误版本、采样率、长度、保留字段或类型。
 
 ## 无串口设备诊断
@@ -86,10 +87,11 @@ Return 校验来源 IP、控制端口和开机会话，忽略重复及倒序诊�
    网卡端点重建，仅保留单播订阅续约；租约失效后立即恢复发现。Windows 上
    JUCE 8.0.6 无法提供接口定向广播地址，因此各绑定 socket 发送 limited
    broadcast，避免 VPN、虚拟网卡或多网卡让发现包只从错误接口发出。
-3. 固件单播 Offer 回请求来源端口，payload 为 `LAN MIC-XXXXXX`；`XXXXXX`
-   是 eFuse MAC 后 6 位大写十六进制，与 USB 产品名和配网热点编号一致，
-   session 为本次开机随机 ID。插件可从带 6 位或 12 位十六进制后缀的历史
-   Offer 中提取末 6 位并规范化显示，允许固件与插件分步升级。
+3. 固件单播 Offer 回请求来源端口，payload 为 `LAN MIC-XXXXXX|设备名称`；`XXXXXX`
+   是 eFuse MAC 后 6 位大写十六进制，与 USB 产品名和配网热点编号一致，设备名称
+   为可修改的显示名（默认等于设备标识），仅用于展示；`session` 为本次开机随机 ID。
+   插件从标识部分提取末 6 位并规范化识别设备（容忍 6 位或 12 位十六进制后缀），
+   选择与偏好始终按标识匹配，显示名不参与识别。
 4. 插件自动选择最先发现的设备，或选择用户指定身份。DHCP 地址不保存在工程中。
 5. 插件每秒向选中设备 45678 发送 Subscribe，flags 为 Sender 或 Receiver，session 为插件实例随机 ID。
 6. 固件每方向独立维护 `源 IP + 源端口 + 插件 session` 租约。未占用或原持有者续约时返回 Ack；冲突时 Ack 追加 Busy。

@@ -202,17 +202,25 @@ void Transport::run() {
                                uint32_t now) {
             if (h.kind != sos::Kind::Offer || port != sos::kDiscoveryPort)
                 return false;
-            const auto rawIdentity = juce::String::fromUTF8(
+            const auto raw = juce::String::fromUTF8(
                 reinterpret_cast<const char*>(packet.data() + sos::kHeaderSize),
                 h.payloadBytes);
-            const auto identity = normalizedDeviceIdentity(rawIdentity);
+            // v10 payload is "identity|display name"; the pipe cannot appear in
+            // either field, so the first one is the separator.
+            const auto separator = raw.indexOfChar('|');
+            const auto identity = normalizedDeviceIdentity(
+                separator < 0 ? raw : raw.substring(0, separator));
             if (identity.isEmpty()) return true;
+            auto display = separator < 0 ? juce::String{}
+                                         : raw.substring(separator + 1).trim();
+            if (display.isEmpty()) display = identity;
             {
                 const juce::ScopedLock lock(settingsLock_);
                 auto found = std::find_if(devices_.begin(), devices_.end(),
                     [&](const Device& d) { return d.identity == identity; });
-                if (found != devices_.end()) *found = {identity, source, now};
-                else if (devices_.size() < 32) devices_.push_back({identity, source, now});
+                if (found != devices_.end()) *found = {identity, display, source, now};
+                else if (devices_.size() < 32)
+                    devices_.push_back({identity, display, source, now});
             }
             if (peerIp.isEmpty() && (preferred.isEmpty() || preferred == identity)) {
                 peerIp = source;
@@ -221,7 +229,7 @@ void Transport::run() {
                 lastSubscribe = now - 1000;
                 state_ = State::Connecting;
                 const juce::ScopedLock lock(settingsLock_);
-                selected_ = identity + " @ " + source;
+                selected_ = display + " @ " + source;
             } else if (source == peerIp && h.session != peerBoot) {
                 clearPeer(); // Reboot: require discovery and a fresh lease.
             }

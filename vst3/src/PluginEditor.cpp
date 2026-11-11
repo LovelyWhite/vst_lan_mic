@@ -153,16 +153,25 @@ void BridgeEditor::resized() {
 
 void BridgeEditor::timerCallback() {
     const auto selected = processor_.network.preferredDevice();
-    juce::StringArray ids;
+    auto discovered = processor_.network.devices();
+    std::sort(discovered.begin(), discovered.end(),
+              [](const Transport::Device& a, const Transport::Device& b) {
+                  return a.identity < b.identity;
+              });
+    juce::StringArray ids, names;
     // Only discovered devices are listed; an unreachable preference must not
-    // linger as a ghost entry.
-    for (const auto& device : processor_.network.devices()) ids.addIfNotAlreadyThere(device.identity);
-    ids.sort(true);
-    if (ids != deviceIds_ || device_.getNumItems() == 0) {
+    // linger as a ghost entry. ids keep the fixed identity (the preference is
+    // stored by identity), names are the user-editable display names.
+    for (const auto& device : discovered) {
+        ids.add(device.identity);
+        names.add(device.name.isNotEmpty() ? device.name : device.identity);
+    }
+    if (ids != deviceIds_ || names != deviceNames_ || device_.getNumItems() == 0) {
         deviceIds_ = ids;
+        deviceNames_ = names;
         device_.clear(juce::dontSendNotification);
         device_.addItem("Automatic (first discovered device)", 1);
-        for (int i = 0; i < deviceIds_.size(); ++i) device_.addItem(deviceIds_[i], i + 2);
+        for (int i = 0; i < deviceNames_.size(); ++i) device_.addItem(deviceNames_[i], i + 2);
     }
     device_.setSelectedId(selected.isEmpty() ? 1 : deviceIds_.indexOf(selected) + 2,
                           juce::dontSendNotification);

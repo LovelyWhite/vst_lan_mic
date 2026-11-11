@@ -43,8 +43,8 @@ USB 两个方向均为 48 kHz、16 bit、双通道；USB IN 按每毫秒 192 字
 - 使用 IPv4 UDP，设备监听 `45678` 进行发现与订阅，监听 `45679` 接收电脑音频。
 - 手机音频由设备从 `45679` 单播到 Return 插件登记的临时端口。
 - 每个插件拥有独立的本地端口；每台设备同时支持一个 Send 和一个 Return 实例。
-- 插件按设备身份保存选择，不依赖固定 IP。设备名称为 `LAN MIC-XXXXXX`。
-- 固件和插件共用 SOS v9 协议，线上字段及音频常量以 [common/Protocol.h](common/Protocol.h) 为准。
+- 插件按设备标识（`LAN MIC-XXXXXX`，来自 eFuse MAC，出厂固定）保存选择，不依赖固定 IP。设备名称为用户可改的显示名称（默认等于设备标识），用于配网热点、插件下拉框和网页顶栏，不参与识别。
+- 固件和插件共用 SOS v10 协议，线上字段及音频常量以 [common/Protocol.h](common/Protocol.h) 为准。
 
 ## 快速使用
 
@@ -59,7 +59,7 @@ USB 两个方向均为 48 kHz、16 bit、双通道；USB IN 按每毫秒 192 字
 
 ### 连接 Wi-Fi
 
-1. 为设备供电。首次使用或无法连接已保存网络时，设备启动配网热点 `LAN MIC-XXXXXX`。
+1. 为设备供电。首次使用或无法连接已保存网络时，设备启动配网热点，热点名即设备名称，默认为 `LAN MIC-XXXXXX`。
 2. 用手机或电脑连接该热点，在配网页面选择 Wi-Fi 并填写密码。默认配网页面地址为 `http://192.168.4.1`。
 3. 配网完成后，将电脑接入同一局域网，再把设备的原生 USB 接口连接手机。
 4. 更换网络时，长按 BOOT 键（GPIO0）至少 3 秒，待状态灯快速闪烁后松开，设备会清除 Wi-Fi 凭据并重启。
@@ -110,6 +110,51 @@ pio run -d esp32s3 -e esp32-s3-devkitc-1 -t upload
 | `encoderTask` | Core 1 | 2 | 48 KiB | 手机播放音频的立体声 Opus 编码 |
 
 PCM 播放和采集队列位于 PSRAM；编解码器状态及编码任务静态栈位于内部 RAM。设备使用非阻塞 socket 和任务通知传递音频，Opus 采用固定点与 Xtensa 优化。
+
+### 串口控制台
+
+固件在 USB CDC（原生 USB 串口）和 UART0 上轮询（约 1 s 一次）接收 `命令 [参数]` 文本行（可打印 ASCII，CR/LF 分帧，大小写不敏感），每行回复一条 `|` 分隔的短文本。CDC 回复走整行限时的写通道：按主机（手机）当时腾出的 FIFO 空间分块发送，整行 3 秒内没发完就整行丢弃，不会只送出半行而打乱对端分帧，其他任务的 `[D] ` 诊断行同样处理。回复以 `OK|`（成功）、`OKR|`（成功，重启后生效）或 `ERR|`（失败）开头，字段按命令固定排序、不带键名，值中的 `|` 与 `\` 用反斜杠转义；脚本据此把回复与其他 `[D] ` 前缀的诊断行区分开。配置写入 NVS（命名空间 `lanmic`）。
+
+| 命令 | 说明 |
+| --- | --- |
+| `help` | 返回支持的命令列表 |
+| `info` | 返回设备、网络与运行状态（字段见下表） |
+| `name` | 读取设备名称（配网热点名，插件端显示名） |
+| `name <名称>` | 设置设备名称（1–32 字节 ASCII，不含空格和 `\|`；热点名重启后生效） |
+| `epin [0\|1\|on\|off\|true\|false]` | 读取／使能 USB IN（麦克风）端点 |
+| `epout [0\|1\|on\|off\|true\|false]` | 读取／使能 USB OUT（播放）端点 |
+| `erase` | 清除设备保存的 Wi-Fi 凭据，设备名称与端点配置不变 |
+| `reboot` | 回复后立即重启设备 |
+
+各命令的回复格式（第一个字段固定为回显的命令名）：
+
+| 回复 | 说明 |
+| --- | --- |
+| `OK\|help\|命令列表` | 命令名以逗号分隔 |
+| `OK\|info\|…` | 字段见下表 |
+| `OK\|name\|名称` / `OKR\|name\|名称` | 读取 / 设置成功 |
+| `OK\|epin\|0或1` / `OKR\|epin\|0或1` | `epout` 同形；读取 / 设置成功 |
+| `OKR\|erase` | 凭据已清除 |
+| `OK\|reboot` | 回复后设备立即重启 |
+| `ERR\|命令\|原因` | 失败回复 |
+
+`info` 回复字段（按以下顺序 `|` 分隔；未连接 Wi-Fi 时 `wip`–`wgw` 四个字段为空）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `dev` / `sn` / `ses` | 设备标识 / USB 序列号 / 本次启动会话 ID |
+| `ver` | SOS 协议版本 |
+| `up` | 启动至今毫秒数 |
+| `wip` / `wrssi` / `wssid` / `wgw` | 本机 IP / 信号 dBm / 已连接网络 SSID / 网关 |
+| `name` | 设备名称（配网热点名，默认等于设备标识） |
+| `ein` / `eout` | USB IN / OUT 端点当前启用状态，`1`/`0` |
+
+```text
+> info
+OK|info|LAN MIC-ABCDEF|00112233445566|123|10|45678|192.168.1.5|-43|mywifi|192.168.1.1|LAN MIC-ABCDEF|1|1
+> name my-mic
+OKR|name|my-mic
+```
 
 ### VST3 插件
 
@@ -234,6 +279,7 @@ exec(compile(open("docs/enc_build.py").read(), "enc_build.py", "exec"), {})
 | [esp32s3/](esp32s3/) | PlatformIO 固件工程 |
 | [esp32s3/src/main.cpp](esp32s3/src/main.cpp) | USB 音频、配网与各任务实现 |
 | [esp32s3/src/NonBlockingUdp.h](esp32s3/src/NonBlockingUdp.h) | 非阻塞 UDP 封装 |
+| [esp32s3/src/Console.cpp](esp32s3/src/Console.cpp) | 串口管道控制台与 NVS 配置 |
 | [vst3/](vst3/) | JUCE Send / Return 插件与 CMake 预设 |
 | [scripts/](scripts/) | macOS、Windows 插件安装及打包脚本 |
 | [docs/](docs/) | 网络协议说明、PCB 三维模型与外壳建模脚本 |

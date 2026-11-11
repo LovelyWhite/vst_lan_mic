@@ -6,9 +6,10 @@
 
 namespace sos {
 constexpr uint32_t kMagic = 0x31534f53;
-// v9: the DAW-to-device uplink became stereo Opus; v8 carried it as mono Opus
-// and v7 as 14 ms mono PCM (kind Audio, removed).
-constexpr uint8_t kVersion = 9;
+// v10: the Offer payload became "identity|device name"; v9 made the DAW-to-device
+// uplink stereo Opus; v8 carried it as mono Opus and v7 as 14 ms mono PCM
+// (kind Audio, removed).
+constexpr uint8_t kVersion = 10;
 constexpr uint16_t kDiscoveryPort = 45678;
 constexpr uint16_t kUplinkPort = 45679;
 constexpr uint32_t kSampleRate = 48000;

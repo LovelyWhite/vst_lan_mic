@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "AudioTasks.h"
+#include "Console.h"
 #include "DeviceIdentity.h"
 #include "NonBlockingUdp.h"
 #include "Pacer.h"
@@ -198,8 +199,11 @@ void networkTask(void*) {
                 if (h.kind == sos::Kind::Discover) {
                     reply.kind = sos::Kind::Offer;
                     reply.session = bootSession;
-                    reply.payloadBytes = uint16_t(strlen(identity));
-                    memcpy(packet.data() + sos::kHeaderSize, identity, reply.payloadBytes);
+                    // v10 payload: "identity|display name", identity keeps the
+                    // plugin's selection stable while the name is user-facing.
+                    reply.payloadBytes = uint16_t(snprintf(
+                        reinterpret_cast<char*>(packet.data() + sos::kHeaderSize),
+                        sos::kOpusMaxBytes, "%s|%s", identity, deviceName));
                 } else if (h.kind == sos::Kind::Subscribe) {
                     Peer& peer = h.flags == sos::Sender ? sender : receiver;
                     const bool accepted = !peer.active(now) || peer.matches(ip, port, h.session);

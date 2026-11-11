@@ -5,7 +5,7 @@
 class Transport final : private juce::Thread {
 public:
     enum class State { Searching, Connecting, Connected, Busy, SocketError };
-    struct Device { juce::String identity, ip; uint32_t seenMs = 0; };
+    struct Device { juce::String identity, name, ip; uint32_t seenMs = 0; };
     explicit Transport(bool sending);
     ~Transport() override;
 

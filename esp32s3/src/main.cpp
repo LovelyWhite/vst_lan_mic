@@ -5,11 +5,13 @@
 #include <esp_memory_utils.h>
 #include <esp_system.h>
 #include <freertos/idf_additions.h>
+#include <freertos/semphr.h>
 #include <cassert>
 #include <cstdio>
 #include <new>
 
 #include "AudioTasks.h"
+#include "Console.h"
 #include "DeviceIdentity.h"
 #include "NetworkTask.h"
 #include "Serial.h"
@@ -41,6 +43,56 @@ using namespace lanmic;
 USBCDC USBSerial; // Definition for the extern declaration in Serial.h.
 #endif
 
+BoundedCdcPrint cdcSerial; // Definition for the extern declaration in Serial.h.
+
+// See Serial.h: USBCDC::write() is only entered while the TinyUSB TX FIFO
+// still has room for the chunk, so its no-timeout busy-wait can never start;
+// every wait for room blocks in vTaskDelay, keeping IDLE0 runnable and the
+// watchdog fed even when the host stops draining CDC IN during audio playback.
+void BoundedCdcPrint::send() {
+    static SemaphoreHandle_t txLock = xSemaphoreCreateMutex();
+    const size_t bytes = len;
+    len = 0;
+    if (!bytes || !txLock ||
+        xSemaphoreTake(txLock, pdMS_TO_TICKS(kLineBudgetMs)) != pdTRUE) {
+        return; // the port is busy with another line or went dead: drop ours
+    }
+    const uint32_t started = millis();
+    size_t off = 0;
+    while (off < bytes && USBSerial) {
+        const size_t before = off;
+        const int space = USBSerial.availableForWrite();
+        if (space > 0) {
+            const size_t left = bytes - off;
+            off += USBSerial.write(reinterpret_cast<const uint8_t*>(line + off),
+                                   size_t(space) < left ? size_t(space) : left);
+        }
+        if (off == before) {
+            if (uint32_t(millis() - started) >= kLineBudgetMs) break;
+            vTaskDelay(1); // 10 ms ticks; the host drains CDC between waits
+        }
+    }
+    xSemaphoreGive(txLock);
+}
+
+size_t BoundedCdcPrint::write(uint8_t c) {
+    if (dropping) {
+        if (c == '\n') dropping = false;
+    } else if (len == sizeof(line)) {
+        len = 0; // over-long line: discard it whole, never half of it
+        dropping = c != '\n';
+    } else {
+        line[len++] = char(c);
+        if (c == '\n') send();
+    }
+    return 1; // buffered: Print gets no error for a line dropped on the wire
+}
+
+void BoundedCdcPrint::flush() {
+    if (len) send();
+    USBSerial.flush();
+}
+
 void setup() {
     // CDC registers first so it owns interfaces 0-1; the audio class follows.
     SERIAL_INIT();
@@ -70,8 +122,12 @@ void setup() {
     snprintf(identity, sizeof(identity), "%s-%s", sos::kDeviceName, deviceNumber);
     bootSession = esp_random();
     if (!bootSession) bootSession = 1;
-    char provisioningSsid[33]{};
-    snprintf(provisioningSsid, sizeof(provisioningSsid), "%s", identity);
+    loadDeviceConfig();
+    // Started before USB audio comes up, so a broken endpoint setting (a
+    // usb.begin() failure below) or the blocking provisioning portal can still
+    // be fixed over serial. Core 1, priority 1: off core 0's audio/network
+    // tasks and below encoderTask (2).
+    xTaskCreatePinnedToCore(consoleTask, "sos-console", 4096, nullptr, 1, nullptr, 0);
 
     audio_tools::USBAudioConfig config;
     config.sample_rate = sos::kSampleRate;
@@ -80,7 +136,8 @@ void setup() {
     config.product = identity;
     config.manufacturer = "suxitech";
     config.serial = usbSerial;
-    config.enable_ep_in = config.enable_ep_out = true;
+    config.enable_ep_in = enableEpIn;
+    config.enable_ep_out = enableEpOut;
     config.enable_feedback_ep = false;
     config.enable_multi_sample_rate = false;
     // The descriptor reserves 49 samples, but flow control sends exactly
@@ -115,8 +172,8 @@ void setup() {
         wifiManager.server->send(302, "text/plain", "");
       });
     });
-    SERIAL_PRINTF("[D] Open Wi-Fi provisioning AP: %s\n", provisioningSsid);
-    if (!wifiManager.autoConnect(provisioningSsid)) {
+    SERIAL_PRINTF("[D] Open Wi-Fi provisioning AP: %s\n", deviceName);
+    if (!wifiManager.autoConnect(deviceName)) {
         statusError.store(true, std::memory_order_relaxed);
         SERIAL_PRINTF("[D] Wi-Fi provisioning failed to start; rebooting\n");
         delay(1000);

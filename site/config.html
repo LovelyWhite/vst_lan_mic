@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>设备配置 · LAN MIC</title>
+<meta name="description" content="连接 LAN MIC 设备。">
+<style>
+  :root {
+    --bg: #0b0f14; --panel: #141c27; --panel-2: #18222f;
+    --line: rgba(148, 178, 210, .14);
+    --text: #e8eef5; --muted: #9fb0c2; --dim: #6e8194;
+    --accent: #4db2ff; --accent-2: #59d9c1;
+    --grad: linear-gradient(120deg, #4db2ff 0%, #59d9c1 100%);
+    --red: #e5484d; --amber: #e5a54d;
+    --radius: 14px; --max: 860px;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, "JetBrains Mono", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    min-height: 100vh;
+    background:
+      radial-gradient(900px 480px at 12% -10%, rgba(77, 178, 255, .16), transparent 60%),
+      radial-gradient(760px 420px at 92% 4%, rgba(89, 217, 193, .12), transparent 58%),
+      var(--bg);
+    background-attachment: fixed;
+    color: var(--text); line-height: 1.7;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  .wrap { max-width: var(--max); margin: 0 auto; padding: 0 24px; }
+  nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(11, 15, 20, .78);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav-inner { max-width: var(--max); margin: 0 auto; padding: 0 24px; height: 60px; display: flex; align-items: center; gap: 10px; }
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; color: var(--text); }
+  .logo:hover { text-decoration: none; }
+  .logo-mark { width: 26px; height: 26px; border-radius: 8px; background: var(--grad); position: relative; flex: none; }
+  .logo-mark::after { content: ""; position: absolute; inset: 7px; border-radius: 50%; border: 2.5px solid #0b0f14; }
+  .logo small { font-weight: 500; color: var(--dim); font-size: 12px; }
+  nav .nav-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .icon-btn {
+    width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 10px; border: 1px solid var(--line); background: rgba(255, 255, 255, .04);
+    color: var(--muted); cursor: pointer; transition: color .15s, background .15s, border-color .15s, transform .15s;
+  }
+  .icon-btn:hover:not(:disabled) { color: var(--text); background: rgba(255, 255, 255, .09); border-color: rgba(148, 178, 210, .3); }
+  .icon-btn:disabled { opacity: .35; cursor: not-allowed; }
+  .icon-btn svg { width: 17px; height: 17px; }
+  .icon-btn.spin svg { animation: spin .9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  nav .back { font-size: 14px; color: var(--muted); }
+  nav .back:hover { color: var(--text); text-decoration: none; }
+  main { padding: 34px 0 64px; }
+  /* .idle sets display, so hidden needs the stronger guard */
+  [hidden] { display: none !important; }
+  /* the empty card sits in the middle of the page; browsers without :has() just get it under the nav */
+  main:has(#idle:not([hidden])) {
+    min-height: calc(100vh - 158px);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  main:has(#idle:not([hidden])) .note { align-self: stretch; }
+  .idle {
+    display: flex; align-items: center; justify-content: center;
+    width: min(100%, 460px); min-height: 260px; padding: 40px 20px;
+    text-align: center; border: 1px dashed var(--line); border-radius: var(--radius); color: var(--muted);
+  }
+  .idle b { font-size: 16px; font-weight: 600; color: var(--text); }
+  .card {
+    position: relative; overflow: hidden;
+    background: linear-gradient(180deg, rgba(255, 255, 255, .035), rgba(255, 255, 255, 0)) , var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 20px 22px; margin-bottom: 16px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 14px 30px -22px rgba(0, 0, 0, .8);
+    transition: border-color .2s ease, transform .2s ease, box-shadow .2s ease;
+  }
+  .card:hover { border-color: rgba(148, 178, 210, .28); transform: translateY(-1px); }
+  .card::before { content: ""; position: absolute; inset: 0 0 auto; height: 1px; background: var(--grad); opacity: .35; }
+  .card h2 { font-size: 15px; font-weight: 700; letter-spacing: .2px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  .card h2::before { content: ""; width: 3px; height: 14px; border-radius: 2px; background: var(--grad); flex: none; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .row:last-child { margin-bottom: 0; }
+  .nav-actions .dot { margin-right: 2px; }
+  .nav-actions .dev { font-family: var(--mono); font-size: 12.5px; color: var(--muted); max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 18px; border-radius: 10px; border: 1px solid var(--line);
+    font-size: 14px; font-weight: 600; cursor: pointer;
+    background: rgba(255, 255, 255, .04); color: var(--text);
+    transition: background .15s ease, transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+  }
+  .btn:hover:not(:disabled) { background: rgba(255, 255, 255, .08); border-color: rgba(148, 178, 210, .3); transform: translateY(-1px); }
+  .btn:active:not(:disabled) { transform: translateY(0); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn-primary { background: var(--grad); color: #081018; border: none; box-shadow: 0 6px 18px -8px rgba(77, 178, 255, .7); }
+  .btn-primary:hover:not(:disabled) { background: var(--grad); filter: brightness(1.08); box-shadow: 0 10px 24px -8px rgba(77, 178, 255, .8); }
+  .btn-danger { color: var(--red); border-color: rgba(229, 72, 77, .4); background: rgba(229, 72, 77, .08); }
+  .btn-danger:hover:not(:disabled) { color: var(--red); border-color: rgba(229, 72, 77, .6); background: rgba(229, 72, 77, .18); }
+  /* after .btn so its padding wins the cascade */
+  .btn-sm { padding: 6px 13px; font-size: 13px; border-radius: 8px; }
+  /* the button whose command is still waiting for the device reply */
+  .btn.loading { cursor: progress; }
+  .btn.loading:disabled { opacity: 1; }
+  .btn.loading::before {
+    content: ""; flex: none; width: 12px; height: 12px; border-radius: 50%;
+    border: 2px solid currentColor; border-top-color: transparent;
+    animation: spin .8s linear infinite;
+  }
+  input[type=text] {
+    flex: 1 1 220px; min-width: 0;
+    background: rgba(0, 0, 0, .3); border: 1px solid var(--line);
+    color: var(--text); border-radius: 10px; padding: 8px 12px; font-size: 14px;
+    font-family: var(--mono); transition: border-color .15s ease, box-shadow .15s ease;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(77, 178, 255, .18); }
+  .sw-row { display: flex; align-items: center; gap: 14px; padding: 11px 14px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel-2); transition: border-color .15s ease; }
+  .sw-row:hover { border-color: rgba(148, 178, 210, .3); }
+  .sw-row .txt { min-width: 0; }
+  .sw-row .txt b { font-size: 14px; font-weight: 600; }
+  .sw-row .txt small { display: block; color: var(--dim); font-size: 12px; line-height: 1.5; }
+  .sw { position: relative; margin-left: auto; flex: none; width: 42px; height: 23px; }
+  .sw input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; margin: 0; cursor: pointer; }
+  .sw i { display: block; width: 42px; height: 23px; border-radius: 999px; background: #2a3648; border: 1px solid var(--line); transition: background .18s ease, border-color .18s ease; }
+  .sw i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 17px; height: 17px; border-radius: 50%; background: #8a97a8; transition: transform .18s ease, background .18s ease; }
+  .sw input:checked + i { background: rgba(77, 178, 255, .3); border-color: rgba(77, 178, 255, .55); }
+  .sw input:checked + i::after { transform: translateX(19px); background: var(--accent); }
+  .sw input:disabled { cursor: not-allowed; }
+  .sw input:disabled + i { opacity: .5; }
+  .sw input:focus-visible + i { box-shadow: 0 0 0 3px rgba(77, 178, 255, .25); }
+  .hint { color: var(--dim); font-size: 12.5px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); flex: none; }
+  .dot.on { background: var(--accent-2); box-shadow: 0 0 0 4px rgba(89, 217, 193, .16); animation: breathe 2.4s ease-in-out infinite; }
+  @keyframes breathe { 50% { box-shadow: 0 0 0 7px rgba(89, 217, 193, .07); } }
+  #banner {
+    position: fixed; left: 50%; bottom: 26px; z-index: 60; transform: translateX(-50%);
+    max-width: min(560px, calc(100vw - 32px));
+    border-radius: 10px; padding: 10px 14px; font-size: 13.5px; display: none;
+    box-shadow: 0 14px 34px -14px rgba(0, 0, 0, .85);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  }
+  #banner.ok { display: block; background: rgba(89, 217, 193, .14); border: 1px solid rgba(89, 217, 193, .4); color: var(--accent-2); }
+  #banner.err { display: block; background: rgba(229, 72, 77, .14); border: 1px solid rgba(229, 72, 77, .45); color: var(--red); }
+  #banner.warn { display: block; background: rgba(229, 165, 77, .14); border: 1px solid rgba(229, 165, 77, .45); color: var(--amber); }
+  .grp { margin-bottom: 14px; }
+  .grp:last-child { margin-bottom: 0; }
+  .gt { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: .3px; margin-bottom: 4px; }
+  .kvs { display: grid; grid-template-columns: repeat(auto-fill, minmax(178px, 1fr)); gap: 1px 20px; }
+  .kv { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 3px 0; min-width: 0; border-bottom: 1px solid rgba(148, 178, 210, .08); }
+  .kv span { color: var(--dim); font-size: 12.5px; flex: none; }
+  .kv b { font-family: var(--mono); font-weight: 500; font-size: 12.5px; text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .kv b.ph { color: var(--dim); font-weight: 400; }
+  .note {
+    border-left: 3px solid var(--accent); background: rgba(77, 178, 255, .07);
+    border-radius: 10px; padding: 12px 16px; font-size: 13px; color: var(--muted); margin-bottom: 16px;
+  }
+  .note.warn { border-color: var(--amber); background: rgba(229, 165, 77, .07); }
+  #banner { animation: rise .18s ease; }
+  @keyframes rise { from { opacity: 0; transform: translate(-50%, 8px); } }
+  @media (max-width: 560px) {
+    nav .back { display: none; }
+    .nav-inner { height: auto; padding: 12px 16px; flex-wrap: wrap; row-gap: 8px; }
+    main { padding: 26px 0 48px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+  footer { padding: 30px 0; color: var(--dim); font-size: 13px; text-align: right; }
+  footer a { color: var(--muted); }
+  footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a class="logo" href="index.html">
+      <span class="logo-mark"></span>
+      <span>LAN MIC <small>设备配置</small></span>
+    </a>
+    <div class="nav-actions">
+      <span class="dot" id="statusDot" title="未连接"></span>
+      <span class="dev" id="devName" hidden></span>
+      <button class="btn btn-sm btn-primary" id="btnConn">连接设备</button>
+      <button class="icon-btn" id="btnRefresh" disabled title="刷新设备信息" aria-label="刷新设备信息">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      </button>
+      <a class="back" href="index.html">← 返回产品页</a>
+    </div>
+  </div>
+</nav>
+
+<main class="wrap">
+  <div id="noSerial" class="note warn" style="display:none">
+    当前浏览器无法连接设备，请使用桌面版 Chrome 或 Edge 打开本页。
+  </div>
+
+  <div id="banner"></div>
+
+  <div id="idle" class="idle">
+    <b>请先将 LAN MIC 连接到本设备。</b>
+  </div>
+
+  <div id="panels" hidden>
+  <div class="card">
+    <h2>设备状态</h2>
+    <div id="infoGrid"></div>
+  </div>
+
+  <div class="card">
+    <h2>设备名称</h2>
+    <div class="row">
+      <input type="text" id="ssidIn" maxlength="32" placeholder="例如 Studio-Mic">
+      <button class="btn btn-primary" id="btnSsidSet" disabled>保存</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>音频通道</h2>
+    <div class="sw-row">
+      <span class="txt"><b>接收 DAW 输入</b><small>开启后设备将接收 DAW 音频送入手机麦克风</small></span>
+      <label class="sw"><input type="checkbox" id="chkIn" disabled><i></i></label>
+    </div>
+    <div class="sw-row">
+      <span class="txt"><b>转接设备音频</b><small>开启后设备将转接手机音频到 DAW</small></span>
+      <label class="sw"><input type="checkbox" id="chkOut" disabled><i></i></label>
+    </div>
+    <p class="hint">打开或关闭即自动保存，修改需重启设备生效</p>
+  </div>
+
+  <div class="card">
+    <h2>维护</h2>
+    <div class="row">
+      <button class="btn btn-danger" id="btnErase" disabled>清除 WiFi 凭据</button>
+      <button class="btn" id="btnReboot" disabled>重启设备</button>
+    </div>
+    <p class="hint">只清除设备保存的 WiFi 名称和密码，设备名称与音频通道不受影响；重启后设备重新进入配网</p>
+  </div>
+  </div>
+</main>
+
+<footer class="wrap">© 2026 suxitech · <a href="https://suxitech.cn">suxitech.cn</a></footer>
+
+<script>
+'use strict';
+
+// ---------- line framing: replies are one pipe-delimited line per \r\n ----------
+let buf = '';
+function takeLines(chunk) {
+  buf += chunk;
+  const i = buf.lastIndexOf('\n');
+  if (i < 0) return [];
+  const lines = buf.slice(0, i).split('\n');
+  buf = buf.slice(i + 1);
+  return lines.map(s => s.replace(/\r$/, '')).filter(Boolean);
+}
+
+// self-check for the framer: noise dropped, tails kept across chunks
+(() => {
+  const saved = buf; buf = '';
+  const a = takeLines('[D] noise\r\nOK|info|dev\r\nERR|name');
+  const b = takeLines('|bad\r\n');
+  const pass = a.length === 2 && a[1] === 'OK|info|dev'
+            && b.length === 1 && b[0] === 'ERR|name';
+  buf = saved;
+  if (!pass) console.error('framer self-check failed');
+})();
+
+const $ = id => document.getElementById(id);
+const esc = v => String(v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// info fields arrive positionally as OK|info|dev|sn|ses|ver|up|wip|wrssi|wssid|wgw|name|ein|eout;
+// network fields are empty when the device is offline, name/ein/eout have their own cards.
+const INFO_KEYS = ['dev', 'sn', 'ses', 'ver', 'up', 'wip', 'wrssi', 'wssid', 'wgw', 'name'];
+const LABELS = {
+  dev: '设备标识', sn: '序列号', ses: '会话编号', ver: '版本号', up: '已运行',
+  wip: '本机 IP', wrssi: '信号强度', wssid: '已连网络', wgw: '网关',
+};
+const GROUPS = {
+  '设备': ['dev', 'sn', 'ses', 'ver'],
+  '运行': ['up'],
+  '网络': ['wip', 'wrssi', 'wssid', 'wgw'],
+};
+const UNITS = { up: 'ms', wrssi: 'dBm' };
+const ACTS = { info: '获取设备信息', name: '设备名称', epin: '接收 DAW 输入', epout: '转接设备音频', erase: '清除 WiFi 凭据', reboot: '重启设备' };
+
+let port = null, reader = null, connected = false;
+let pending = null;                 // { cmd, timer }
+let bannerTimer = 0;                // the toast hides itself again
+const queue = [];                   // lines waiting to be sent
+const ep = { ein: null, eout: null }; // last values known from the device
+const ACT_IDS = ['btnSsidSet', 'btnErase', 'btnReboot', 'btnRefresh'];
+const CMD_BTN = { name: 'btnSsidSet', erase: 'btnErase', reboot: 'btnReboot' };
+const BUSY_TXT = { name: '保存中', erase: '清除中', reboot: '重启中' };
+// Text labels are cached so the loading wording can be undone; btnRefresh holds an icon and is left alone.
+const BTN_TEXT = {};
+for (const id of ['btnSsidSet', 'btnErase', 'btnReboot']) BTN_TEXT[id] = $(id).textContent;
+
+function banner(kind, text) {
+  const el = $('banner');
+  el.className = '';                       // dropping and re-adding the class replays the toast
+  el.textContent = text;
+  void el.offsetWidth;
+  el.className = kind;
+  clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(() => { el.className = ''; }, 6000);
+}
+function setBusy() {
+  const busy = !!pending || queue.length > 0;
+  const loadingId = pending ? CMD_BTN[pending.cmd] || '' : '';
+  for (const id of ACT_IDS) {
+    $(id).disabled = busy || !connected;
+    const on = id === loadingId && busy;
+    $(id).classList.toggle('loading', on);
+    if (!(id in BTN_TEXT)) continue;
+    $(id).textContent = on ? BUSY_TXT[pending.cmd] || BTN_TEXT[id] : BTN_TEXT[id];
+  }
+  // Switches apply on change, so they lock while a write is in flight.
+  $('chkIn').disabled = $('chkOut').disabled = busy || !connected;
+  $('btnRefresh').classList.toggle('spin', busy);
+}
+function setConnected(on) {
+  connected = on;
+  if (!on) { port = null; reader = null; buf = ''; queue.length = 0; if (pending) { clearTimeout(pending.timer); pending = null; } $('devName').textContent = ''; fillInfo(); }
+  $('statusDot').className = 'dot' + (on ? ' on' : '');
+  $('statusDot').title = on ? '已连接' : '未连接';
+  $('devName').hidden = !on;
+  // one button both ways: label and weight follow the connection state
+  $('btnConn').textContent = on ? '断开' : '连接设备';
+  $('btnConn').classList.toggle('btn-primary', !on);
+  $('idle').hidden = on;
+  $('panels').hidden = !on;
+  setBusy();
+}
+
+function send(line) { queue.push(line); pump(); }
+function pump() {
+  if (pending || !queue.length || !connected) return;
+  const line = queue.shift();
+  if (line.length > 63) {           // shortcut: the device accepts at most 63 chars per line
+    banner('err', '内容过长，请缩短后重试');
+    setBusy();
+    return;
+  }
+  const cmd = line.split(' ')[0];
+  pending = { cmd, timer: setTimeout(() => settle({ cmd, err: '设备无响应，请确认设备已接通并插在电脑上', restart: false, f: [] }), 15000) };
+  setBusy();
+  tx(line);
+}
+async function tx(line) {
+  console.log('[send]', line);
+  let w;
+  try {
+    w = port.writable.getWriter();
+    await w.write(new TextEncoder().encode(line + '\n'));
+  } catch (e) {
+    if (pending && pending.cmd === line.split(' ')[0]) settle({ cmd: pending.cmd, err: '发送失败，请重新连接设备', restart: false, f: [] });
+  } finally {
+    if (w) w.releaseLock();
+  }
+}
+// Split on unescaped |; backslash escapes the separator and itself (firmware pipeEscapeChar).
+function splitFields(s) {
+  const out = [];
+  let cur = '', bs = false;
+  for (const c of s) {
+    if (bs) { cur += c; bs = false; }
+    else if (c === '\\') bs = true;
+    else if (c === '|') { out.push(cur); cur = ''; }
+    else cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+// "OK|cmd|f1|f2" / "OKR|cmd|..." (reboot needed) / "ERR|cmd|reason" -> { cmd, err, restart, f }
+function parseReply(line) {
+  const sep = line.indexOf('|');
+  const kind = sep > 0 ? line.slice(0, sep) : '';
+  if (kind !== 'OK' && kind !== 'OKR' && kind !== 'ERR') return null;
+  const f = splitFields(line.slice(sep + 1));
+  return { cmd: (f.shift() || '').toLowerCase(), err: kind === 'ERR' ? f[0] : null, restart: kind === 'OKR', f };
+}
+function onLine(line) {
+  console.log('[serial]', line);     // every device line: replies plus [D] diagnostics
+  const r = parseReply(line);
+  if (!r) return;                        // [D] diagnostics and other noise
+  if (pending && r.cmd === pending.cmd) settle(r);
+  else render(r);
+}
+function settle(obj) {
+  if (pending) { clearTimeout(pending.timer); pending = null; }
+  render(obj);
+  setBusy();
+  pump();
+}
+
+// Every field is always listed, grouped; values the device has not reported show a dash.
+function fillInfo(obj) {
+  const parts = [];
+  for (const g in GROUPS) {
+    const rows = [];
+    for (const k of GROUPS[g]) {
+      let v = '—';
+      if (obj && k in obj) v = UNITS[k] ? obj[k] + ' ' + UNITS[k] : obj[k];
+      const t = esc(v);
+      rows.push(`<div class="kv"><span>${LABELS[k]}</span><b${v === '—' ? ' class="ph"' : ''} title="${t}">${t}</b></div>`);
+    }
+    parts.push(`<div class="grp"><div class="gt">${g}</div><div class="kvs">${rows.join('')}</div></div>`);
+  }
+  $('infoGrid').innerHTML = parts.join('');
+}
+
+function render(r) {
+  const cmd = r.cmd || '';
+  if (r.err != null) { banner('err', (ACTS[cmd] || '操作') + '失败：' + r.err); return; }
+  if (cmd === 'info') {
+    const obj = {};
+    INFO_KEYS.forEach((k, i) => { if (r.f[i]) obj[k] = r.f[i]; }); // empty fields stay hidden
+    obj.ein = r.f[10] === '1'; obj.eout = r.f[11] === '1';
+    fillInfo(obj);
+    $('devName').textContent = r.f[9] || r.f[0] || ''; // the card shows the display name
+    $('ssidIn').value = r.f[9] || '';
+    ep.ein = obj.ein; ep.eout = obj.eout;
+    $('chkIn').checked = obj.ein; $('chkOut').checked = obj.eout;
+    banner('ok', '设备信息已更新');
+    return;
+  }
+  if (cmd === 'name') {
+    $('ssidIn').value = r.f[0] || '';
+    $('devName').textContent = r.f[0] || '';
+    banner(r.restart ? 'warn' : 'ok', r.restart ? '设备名称已保存，插件端立即生效，热点名称点击「重启设备」后生效' : '当前设备名称：' + (r.f[0] || ''));
+    return;
+  }
+  if (cmd === 'epin' || cmd === 'epout') {
+    const k = cmd === 'epin' ? 'ein' : 'eout';
+    ep[k] = r.f[0] === '1';
+    $('chkIn').checked = ep.ein; $('chkOut').checked = ep.eout;
+    banner('ok', ACTS[cmd] + '已' + (ep[k] ? '开启' : '关闭') + (r.restart ? '，重启后生效' : ''));
+    return;
+  }
+  if (cmd === 'erase') { banner('warn', '已清除 WiFi 凭据，点击「重启设备」后设备重新进入配网'); return; }
+  if (cmd === 'reboot') { banner('ok', '设备正在重启，稍后请重新连接'); return; }
+}
+
+async function connect() {
+  if (!('serial' in navigator)) { $('noSerial').style.display = 'block'; return; }
+  try {
+    // Always open the picker: a stale grant from an unplugged device used to be
+    // opened silently here, so the list of devices never showed up.
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 }); // the device ignores the speed
+    setConnected(true);
+    banner('ok', '已连接，正在获取设备信息…');
+    reader = port.readable.getReader();
+    const dec = new TextDecoder();
+    (async () => {
+      try {
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (value) for (const line of takeLines(dec.decode(value, { stream: true }))) onLine(line);
+          if (done) break;
+        }
+      } catch { /* aborted on disconnect */ }
+      finally { try { reader.releaseLock(); } catch {} setConnected(false); }
+    })();
+    send('info');
+  } catch (e) {
+    // a cancel from the chooser is not an error worth a banner
+    if (e.name !== 'NotFoundError') banner('err', '连接失败：' + (e.message || '请重新插入设备后再试一次'));
+    setConnected(false);
+  }
+}
+async function disconnect() {
+  // setConnected(false) runs from the read loop as soon as cancel() lands and
+  // nulls port/reader, so hold the handles first; without close() the browser
+  // keeps claiming the CDC interface and reconnecting fails with "already open".
+  const p = port, r = reader;
+  try { if (r) { await r.cancel(); await r.closed; r.releaseLock(); } } catch {}
+  try { if (p) await p.close(); } catch {}
+  setConnected(false);
+}
+
+$('btnConn').onclick = () => (connected ? disconnect() : connect());
+$('btnRefresh').onclick = () => send('info');
+$('btnSsidSet').onclick = () => {
+  const v = $('ssidIn').value.trim();
+  // '|' is the UDP Offer field separator and spaces cannot reach the console
+  // parser, so both are rejected here and in the firmware.
+  if (!/^[\x20-\x7e]{1,32}$/.test(v) || v.includes(' ') || v.includes('|')) {
+    banner('err', '设备名称请填 1–32 位英文或数字，不要包含空格和 |');
+    return;
+  }
+  send('name ' + v);
+};
+// A switch flip writes right away; the device state arrives with info, so a flip before that is ignored.
+function applyEp() {
+  if (ep.ein === null || ep.eout === null) { banner('warn', '正在获取设备状态，请稍候'); return; }
+  if (ep.ein !== $('chkIn').checked) send('epin ' + ($('chkIn').checked ? 1 : 0));
+  if (ep.eout !== $('chkOut').checked) send('epout ' + ($('chkOut').checked ? 1 : 0));
+}
+$('chkIn').onchange = applyEp;
+$('chkOut').onchange = applyEp;
+$('btnErase').onclick = () => { if (confirm('清除后当前网络连接会立即断开，设备名称与音频通道不受影响。确定清除设备保存的 WiFi 名称和密码？')) send('erase'); };
+$('btnReboot').onclick = () => { if (confirm('立即重启设备？')) send('reboot'); };
+fillInfo();
+if (!('serial' in navigator)) $('noSerial').style.display = 'block';
+</script>
+</body>
+</html>
