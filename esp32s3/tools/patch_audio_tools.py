@@ -6,9 +6,10 @@ only the downlink (readBytes) applies it.  On macOS that makes the input
 slider silently retoggle the output volume while never affecting the mic.
 
 The patch gives the mic-path Feature Unit its own volume/mute state; the
-uplink applies it via inputGain() in AudioTasks.cpp.  .pio/ is gitignored,
-so this extra_script re-applies the edits after every fresh dependency
-install.
+uplink applies it via inputGain() in AudioTasks.cpp.  It also narrows the
+Feature Unit GET_RANGE resolution to 1/256 dB so host volume-key steps are
+not quantised away.  .pio/ is gitignored, so this extra_script re-applies the
+edits after every fresh dependency install.
 
 shortcut: anchors are exact-match against audio-tools v1.3.0 (pinned in
 platformio.ini); if a build fails on "anchor mismatch" after bumping
@@ -95,6 +96,55 @@ STREAM_EDITS = [
     input_mute_.assign(vol_sz, false);
 """,
     ),
+    # True-dB volume curve: the fork's linear mapping (gain = 1 + dB/100)
+    # saturates near the top of the slider, so macOS volume keys (small dB
+    # steps near 0 dB) changed the gain imperceptibly while dragging (large
+    # dB swings) changed it clearly.  USB Audio 2.0 defines the FU value as
+    # real decibels, which is also what macOS's slider/key curve assumes:
+    # gain = 10^(dB/20).
+    (
+        "#include <cstddef>\n#include <cstdint>\n",
+        "#include <cmath>\n#include <cstddef>\n#include <cstdint>\n",
+    ),
+    (
+        """  /** @brief Convert linear volume (0.0–1.0) to UAC2 int16 (1/256 dB).
+   *  Linear mapping: 0.0 → -100 dB (min), 1.0 → 0 dB (max). */
+  static int16_t floatToUac2(float vol) {
+    if (vol <= 0.0f) return (int16_t)0x8000;
+    if (vol >= 1.0f) return 0;
+    return (int16_t)((1.0f - vol) * kVolumeMinDb256);
+  }
+
+  /** @brief Convert UAC2 int16 (1/256 dB) to linear volume (0.0–1.0).
+   *  Linear mapping within the -100..0 dB range reported by GET_RANGE. */
+  static float uac2ToFloat(int16_t v) {
+    if (v == (int16_t)0x8000) return 0.0f;
+    if (v >= 0) return 1.0f;
+    if (v <= kVolumeMinDb256) return 0.0f;
+    return 1.0f - (float)v / (float)kVolumeMinDb256;
+  }
+""",
+        """  /** @brief Convert linear volume (0.0–1.0) to UAC2 int16 (1/256 dB),
+   *  the exact inverse of uac2ToFloat() within the advertised range. */
+  static int16_t floatToUac2(float vol) {
+    if (vol <= 0.0f) return (int16_t)0x8000;
+    if (vol >= 1.0f) return 0;
+    float db256 = 20.0f * log10f(vol) * 256.0f;
+    if (db256 <= (float)kVolumeMinDb256) return kVolumeMinDb256;
+    return (int16_t)roundf(db256);
+  }
+
+  /** @brief Convert UAC2 int16 (1/256 dB, USB Audio 2.0 unit) to linear
+   *  amplitude: gain = 10^(dB/20), so host keys and slider follow the same
+   *  curve macOS models. */
+  static float uac2ToFloat(int16_t v) {
+    if (v == (int16_t)0x8000) return 0.0f;
+    if (v >= 0) return 1.0f;
+    if (v < kVolumeMinDb256) v = kVolumeMinDb256;  // keep GET_CUR on-grid
+    return powf(10.0f, (float)v / (256.0f * 20.0f));
+  }
+""",
+    ),
 ]
 
 DEVICE_EDITS = [
@@ -118,7 +168,9 @@ DEVICE_EDITS = [
   }
 """,
     ),
-    # SET_CUR: route mic Feature Unit writes to the separate state.
+    # SET_CUR: route mic Feature Unit writes to the separate state and log
+    # them (the mic FU path had no log at all, so host key-vs-slider writes
+    # could not be told apart on the serial console).
     (
         """            if (isFeatureUnit(entityID) &&
                 p_request.bRequest == kAudioCsReqCur) {
@@ -142,6 +194,8 @@ DEVICE_EDITS = [
               } else if (ctrlSel == AUDIO_FU_CTRL_VOLUME) {
                 int16_t v;
                 memcpy(&v, cb, 2);
+                LOGW("FU vol set mic=%d ch=%d dB256=%d", int(micFu), channel,
+                     int(v));
                 if (micFu) setInputVolume(uac2ToFloat(v), channel);
                 else setVolume(uac2ToFloat(v), channel);
               }
@@ -166,6 +220,19 @@ DEVICE_EDITS = [
     (
         "        int16_t v = floatToUac2(volume(channel));\n",
         "        int16_t v = floatToUac2(micFu ? inputVolume(channel) : volume(channel));\n",
+    ),
+    # GET_RANGE: advertise 1/256 dB granularity instead of 1 dB. macOS volume
+    # keys step by far less than 1 dB near 0 dB, so a 1 dB resolution quantised
+    # every key press back to the value already set (no change); dragging the
+    # slider crossed a dB boundary and worked. Fine steps also keep every
+    # GET_CUR readback on the advertised grid.
+    # The floor goes to -48 dB (-12288), what real UAC2 interfaces advertise:
+    # macOS spreads both the key steps and the whole slider travel over the
+    # advertised range, so the -100 dB default made one drag change the gain by
+    # several times what a key press did.
+    (
+        "        int16_t vmin = -25600, vmax = 0, vres = 256;\n",
+        "        int16_t vmin = -12288, vmax = 0, vres = 1;\n",
     ),
 ]
 
