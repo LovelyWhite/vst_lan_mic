@@ -82,7 +82,9 @@ void BoundedCdcPrint::send() {
     // Reported on UART0 only: CDC is the channel that failed, and write() returns 1
     // for a buffered line, so Print never sees an error for a short reply.
     if (off < bytes) {
-        SERIAL_PRINTF("[D] cdc short %u/%u\n", unsigned(off), unsigned(bytes));
+        // Serial.printf, not SERIAL_PRINTF: cdcSerial.printf here re-enters
+        // write()->send() on the '\n', recursing until the task stack canary trips.
+        Serial.printf("[D] cdc short %u/%u\n", unsigned(off), unsigned(bytes));
         // Drop what never reached the wire: those bytes were not transmitted, so
         // this cannot corrupt what the host already got, and leaving them is what
         // latches the port -- a full FIFO makes every later reply short, and it

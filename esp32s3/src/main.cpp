@@ -37,9 +37,13 @@ alignas(portBYTE_ALIGNMENT) StackType_t encoderTaskStack[49152 / sizeof(StackTyp
 StaticTask_t encoderTaskControl;
 alignas(portBYTE_ALIGNMENT) StackType_t networkTaskStack[32768 / sizeof(StackType_t)];
 StaticTask_t networkTaskControl;
-alignas(portBYTE_ALIGNMENT) StackType_t audioTaskStack[8192 / sizeof(StackType_t)];
+alignas(portBYTE_ALIGNMENT) StackType_t audioTaskStack[16384 / sizeof(StackType_t)];
 StaticTask_t audioTaskControl;
 static_assert(sizeof(encoderTaskStack) == 49152, "Keep the measured encoder stack budget");
+// ESP-IDF interprets the static-create depth in BYTES (verified by disassembling
+// the linked libfreertos.a), so the old 8 KB was the real budget and the kernel
+// watermark caught a genuine overflow in the USB gain + playout call chain.
+static_assert(sizeof(audioTaskStack) == 16384, "Keep the doubled audio stack budget");
 
 } // namespace
 } // namespace lanmic
