@@ -1,10 +1,11 @@
 """Build PCB1 plug-in enclosure for FDM on a 0.4 nozzle: base + bonded lid, no screw, no snap.
-Every printed feature is >= 0.40 (one line) and every fit >= 0.30 per side. Coords in PCB space (mm)."""
+Every printed feature is >= 0.40 (one line); board locators and the bonded stop are modelled at 0.05
+per side, which the measured 0.4-nozzle kerf (~0.03/side) opens to about 0.08 assembled. Coords in PCB space (mm)."""
 import FreeCAD as App
 import Part, Mesh, os
 
 OUT = "/Users/lw/work/vst_lan_mic/enclosure"
-OBJ = "/Users/lw/work/vst_lan_mic/docs/3D_PCB1_2026-11-09.obj"
+OBJ = "/Users/lw/work/vst_lan_mic/enclosure/3D_PCB1_2026-11-09.obj"
 
 # --- measured envelope (mm) ---
 # PCB   x 0.015..28.414  y -16.061..-0.010  z -0.800..0.000 (board was 1.0 thick, now 0.8)
@@ -16,7 +17,7 @@ OBJ = "/Users/lw/work/vst_lan_mic/docs/3D_PCB1_2026-11-09.obj"
 #   the outer 0.24 of the wall and opens to a slot behind it (see "relief").
 # Button (part_00) plunger tip past board edge: x 3.768..5.714 y 0.449 z 0.444..1.282
 # Tallest part = shield can (part_01) z 2.400. Nothing but the button passes y = -0.010.
-CLEAR = 0.70          # board edge to cavity wall, per side: a 0.40 locating rib + 0.30 for the printer
+CLEAR = 0.45          # board edge to cavity wall, per side: a 0.40 locating rib + 0.05 model gap
 LOC = 0.40            # locating rib width in plan (one line), welded to the cavity wall below PART
 T = 2.00              # wall thickness, five 0.4 passes
 PART = 0.05           # parting plane, just above board top
@@ -26,27 +27,33 @@ X0, X1 = 0.015 - CLEAR, 28.414 + CLEAR       # cavity plan  -0.285 .. 28.714
 Y0, Y1 = -16.061 - CLEAR, -0.010 + CLEAR     #                -16.361 .. 0.290
 ZFL, ZBB = -2.000 - 0.80, -0.800             # cavity floor (lowest part -2.00) / board bottom
 ZTOP = 2.400 + 0.50                          # cavity ceiling
-WRAP = 0.40            # extra shell length past the cavity on -X; with CLEAR/T it gives 7.40 proud
+# Derived, not a free knob: the end face sits so the plug stays PROUD mm out of the shell (the user's
+# 7.40), whatever CLEAR is. With CLEAR 0.45 this lands on the same x -3.085 as before.
 PLUG_TIP = -10.485     # front end of the USB-C metal tube
+PROUD = 7.40
+WRAP = X0 - T - PLUG_TIP - PROUD             # extra shell length past the cavity on -X
 OX0, OX1 = X0 - T - WRAP, X1 + T
 OY0, OY1 = Y0 - T, Y1 + T
 
 # --- USB-C port (male plug) in the -X wall ---
-# Shell is symmetric about the connector axis, so the port is centred on the end face AND
-# on the metal shell: face centre = AXZ, the air around the 2.42 tube is GAP per side, which is
-# what a 0.4 nozzle can actually hold; the tube still shoulders on the end face in x.
+# Shell is symmetric about the connector axis, so the port is centred on the end face AND on the
+# metal shell. Per the user the plug is exactly 2.40 thick: the opening is cut line to line on that
+# height in z -- the printer opened cuts ~0.03 per side in the stop tests, which is the whole z
+# clearance and leaves no visible gap above or below the shell. Only y keeps GAP air so the plug can
+# slide in. The tube still shoulders on the end face in x.
 # HZ keeps both slabs > RH so the bottom/top rim fillets stay fillets (bottom 5.38, top 4.42).
 # The wall is T long; the connector flare no longer fits that bore behind x -2.85, so RELIEF opens
 # the back of the wall to the flare envelope and the outer 0.23 stays a pure stadium lip.
 AXZ = -0.43            # connector shell axis: tube measures z -1.515..0.775 (2.29..2.42 tall)
-PH = 2.42              # port opening height given by the user
+PH = 2.40              # plug shell thickness per the user: the port matches it line to line
 TUBE_Y = (-12.173, -3.923)
-GAP = 0.20             # FDM hole clearance per side; a 0.08 slip fit cannot be printed
+GAP = 0.05             # y air per side on the 8.28-wide shell; z is line to line on PH
 HZ = 4.90
 OZ0, OZ1 = AXZ - HZ, AXZ + HZ
 # rear flare of the connector: z -2.000..1.130 (the stadium bore stops at -1.720..0.860) while
-# its y -12.10..-4.00 stays inside the bore; 0.06 air around it, opened behind x -2.85
-FLARE = dict(x=(-2.85, X0 + 1.01), y=(TUBE_Y[0] - GAP, TUBE_Y[1] + GAP), z=(ZFL - 0.01, 1.19))
+# its y -12.10..-4.00 stays inside the bore; opened behind x -2.85 with 0.05 air around the body,
+# which keeps the relief 0.05 inside the narrowed bore mouth on each side
+FLARE = dict(x=(-2.85, X0 + 1.01), y=(TUBE_Y[0] - 0.05, TUBE_Y[1] + 0.05), z=(ZFL - 0.01, 1.19))
 
 # Button window in the +Y wall (lid side): 2 x 1 mm over the plunger only (measured
 # x 3.768..5.714 z 0.444..1.282), centred on it; the switch body stays covered by the wall.
@@ -73,10 +80,10 @@ def prism_x(x0, x1, yy, zz, r):
 
 
 def port(g):
-    """(yy, zz, r) of the connector silhouette grown by g: one smooth stadium."""
+    """(yy, zz, r) of the connector silhouette: y grown by g, z line to line on the 2.40 shell."""
     # 0.02 flat: OCCT rejects a fillet radius exactly equal to half the box height
     return [((TUBE_Y[0] - g, TUBE_Y[1] + g),
-             (AXZ - PH / 2 - g, AXZ + PH / 2 + g), PH / 2 + g - 0.02)]
+             (AXZ - PH / 2, AXZ + PH / 2), PH / 2 - 0.02)]
 
 
 def port_solid(x0, x1, g):
