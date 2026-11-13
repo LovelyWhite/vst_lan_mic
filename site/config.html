@@ -586,7 +586,8 @@ $('chkOut').onchange = applyEp;
 $('btnErase').onclick = () => { if (confirm('清除后当前网络连接会立即断开，设备名称与音频通道不受影响。确定清除设备保存的 WiFi 名称和密码？')) send('erase'); };
 $('btnReboot').onclick = () => { if (confirm('立即重启设备？')) send('reboot'); };
 // "更新设备固件" gate: compare the version published in firmware/manifest.json with the
-// one the device reports in its info reply; both are "vMAJOR.MINOR.PATCH" (Version.h).
+// one the device reports in its info reply; both are MAJOR.MINOR.PATCH (Version.h),
+// with an optional "v" prefix, which cmpVer strips before comparing.
 let siteVer = null, devVer = null, flashParts = null;
 const cmpVer = (a, b) => {
   const x = a.replace(/^v/i, '').split('.').map(Number), y = b.replace(/^v/i, '').split('.').map(Number);
