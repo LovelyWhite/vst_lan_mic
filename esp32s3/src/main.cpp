@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <esp_heap_caps.h>
+#include <opus.h>
 #include <esp_memory_utils.h>
 #include <esp_system.h>
 #include <freertos/idf_additions.h>
@@ -21,6 +22,7 @@ namespace lanmic {
 
 char identity[64]{}, usbSerial[24]{};
 uint32_t bootSession = 0;
+void* opusDecoderMemory = nullptr;
 
 namespace {
 
@@ -29,8 +31,14 @@ constexpr uint32_t kWifiResetHoldMs = 3000;
 constexpr uint32_t kWifiSnapshotIntervalMs = 1000;
 
 // Reserve internal RAM before heap fragmentation; Opus scratch is hot, PCM queues are not.
+// Network/audio stacks are static too: a plain xTaskCreate after the provisioning
+// portal fails silently (unchecked pdFAIL) and the task never runs.
 alignas(portBYTE_ALIGNMENT) StackType_t encoderTaskStack[49152 / sizeof(StackType_t)];
 StaticTask_t encoderTaskControl;
+alignas(portBYTE_ALIGNMENT) StackType_t networkTaskStack[32768 / sizeof(StackType_t)];
+StaticTask_t networkTaskControl;
+alignas(portBYTE_ALIGNMENT) StackType_t audioTaskStack[8192 / sizeof(StackType_t)];
+StaticTask_t audioTaskControl;
 static_assert(sizeof(encoderTaskStack) == 49152, "Keep the measured encoder stack budget");
 
 } // namespace
@@ -63,6 +71,7 @@ void setup() {
     assert(esp_ptr_external_ram(queueMemory));
     assert(reinterpret_cast<uintptr_t>(queueMemory) % alignof(AudioQueues) == 0);
     assert(esp_ptr_internal(encoderTaskStack));
+    assert(esp_ptr_internal(networkTaskStack) && esp_ptr_internal(audioTaskStack));
     audioQueues = new (queueMemory) AudioQueues{};
     audio_tools::AudioToolsLogger.setLogLevel(audio_tools::AudioLogger::Error);
     const uint64_t mac = ESP.getEfuseMac();
@@ -108,6 +117,13 @@ void setup() {
         return;
     }
     pinMode(kWifiResetPin, INPUT_PULLUP);
+    // Reserve the uplink decoder's contiguous internal RAM up front: after the
+    // provisioning portal (WebServer, DNSServer, scans) comes and goes, the
+    // heap is fragmented and this allocation is what fails (Opus -7).
+    const int opusDecoderBytes = opus_decoder_get_size(sos::kOpusChannels);
+    opusDecoderMemory = opusDecoderBytes > 0
+        ? heap_caps_malloc(size_t(opusDecoderBytes), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+        : nullptr;
     WiFiManager wifiManager;
     wifiManager.setDebugOutput(false);
     wifiManager.setConnectTimeout(6);
@@ -135,13 +151,11 @@ void setup() {
     // Wi-Fi modem sleep keeps the IDF default here; audioTask widens it to
     // WIFI_PS_NONE only while USB audio is streaming (see kWifiIdleSleepMs).
     WiFi.setAutoReconnect(true);
-    xTaskCreatePinnedToCore(audioTask, "sos-audio", 8192, nullptr, 4, nullptr, 0);
-    // shortcut: initial alloca budgets for 20 ms audio, remeasure high-water marks before changing codec settings.
-    // Encoding owns Core 1: under heavy Wi-Fi retransmits the high-priority
-    // lwIP tasks would crowd a shared core, slowing encoding and growing
-    // raw_trim; networkTask on Core 0 being preempted by audioTask (4) is the
-    // safe direction, with both-direction buffers absorbing its jitter.
-   xTaskCreatePinnedToCore(networkTask, "sos-network", 32768, nullptr, 3, &networkTaskHandle, 0);
+    xTaskCreateStaticPinnedToCore(audioTask, "sos-audio", sizeof(audioTaskStack),
+                                  nullptr, 4, audioTaskStack, &audioTaskControl, 0);
+    networkTaskHandle = xTaskCreateStaticPinnedToCore(
+        networkTask, "sos-network", sizeof(networkTaskStack), nullptr, 3,
+        networkTaskStack, &networkTaskControl, 0);
     encoderTaskHandle = xTaskCreateStaticPinnedToCore(
         encoderTask, "sos-encoder", sizeof(encoderTaskStack), nullptr, 2,
         encoderTaskStack, &encoderTaskControl, 1);

@@ -82,15 +82,11 @@ void networkTask(void*) {
     std::array<uint8_t, sos::kMaxPacketSize + 1> packet{};
 
     // Uplink decoder mirrors the plugin's stereo 20 ms encoder profile; like the
-    // encoder it stays in internal RAM.
+    // encoder it stays in internal RAM, reserved in setup() before provisioning.
     alignas(4) static sos::OpusFrame decoded{};
     // Dedicated to the uplink so a staged frame survives control/downlink reuse
     // of packet.
     alignas(4) static std::array<uint8_t, sos::kMaxPacketSize + 1> audioPacket{};
-    const int opusDecoderBytes = opus_decoder_get_size(sos::kOpusChannels);
-    void* opusDecoderMemory = opusDecoderBytes > 0
-        ? heap_caps_malloc(size_t(opusDecoderBytes), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
-        : nullptr;
     auto* opusDecoder = static_cast<OpusDecoder*>(opusDecoderMemory);
     int opusDecoderStatus = opusDecoder
         ? opus_decoder_init(opusDecoder, sos::kSampleRate, sos::kOpusChannels)
