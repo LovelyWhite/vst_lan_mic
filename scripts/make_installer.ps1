@@ -1,4 +1,4 @@
-# Package the LAN MIC plugins as a Windows installer (Inno Setup).
+﻿# Package the LAN MIC plugins as a Windows installer (Inno Setup).
 # Run on Windows; needs Inno Setup 7 (ISCC.exe), falls back to Inno Setup 6.3+.
 #
 # Usage:
@@ -7,7 +7,7 @@
 # Notes:
 #   - Without plugin arguments, .vst3 files are found under vst3\build*.
 #   - Version is parsed from common\Version.h by default.
-#   - Output: dist\LANMIC_Setup_<version>.exe
+#   - Output: dist\LANMIC_<version>.exe
 #
 # Examples:
 #   .\make_installer.ps1                                  # auto-package from vst3\build*
@@ -103,8 +103,8 @@ New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "错误: ISCC 编译失败" }
 
 # Publish to site so index.html's version-built download links find the file.
-$SetupExe = Join-Path $DistDir "LANMIC_Setup_$Version.exe"
-$SiteExe = Join-Path $RepoRoot "site\LANMIC_Setup_$Version.exe"
+$SetupExe = Join-Path $DistDir "LANMIC_$Version.exe"
+$SiteExe = Join-Path $RepoRoot "site\LANMIC_$Version.exe"
 Copy-Item -LiteralPath $SetupExe -Destination $SiteExe -Force
 
 Write-Host ""

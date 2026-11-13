@@ -1,4 +1,4 @@
-# Install VST3 (.vst3) / VST2 (.dll) plugins into the standard Windows plugin directories.
+﻿# Install VST3 (.vst3) / VST2 (.dll) plugins into the standard Windows plugin directories.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File install_vst_windows.ps1 [-User] <plugin-or-dir>...

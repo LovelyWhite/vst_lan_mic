@@ -605,8 +605,8 @@
         </div>
         <h3>Windows</h3>
         <p>双击 exe 安装器，可选「为所有人 / 仅为我」安装<br>到系统 VST3 插件目录</p>
-        <span class="dl-file" id="winFile">LANMIC_Setup_1.0.0.exe</span>
-        <a class="btn btn-line" id="winDl" href="LANMIC_Setup_1.0.0.exe" download>
+        <span class="dl-file" id="winFile">LANMIC_1.0.0.exe</span>
+        <a class="btn btn-line" id="winDl" href="LANMIC_1.0.0.exe" download>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M4 20h16"/></svg>
           下载 Windows 版
         </a>
@@ -690,7 +690,7 @@
 // Single place to bump the download version; keep in sync with common/Version.h.
 const LANMIC_VERSION = '1.0.0';
 const macFile = 'LANMIC_' + LANMIC_VERSION + '.pkg';
-const winFile = 'LANMIC_Setup_' + LANMIC_VERSION + '.exe';
+const winFile = 'LANMIC_' + LANMIC_VERSION + '.exe';
 document.getElementById('macDl').href = macFile;
 document.getElementById('macFile').textContent = macFile;
 document.getElementById('winDl').href = winFile;

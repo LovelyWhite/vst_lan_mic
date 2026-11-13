@@ -190,7 +190,7 @@ cmake --build --preset mac-universal
 
 ## 安装与打包
 
-`site/` 提供随仓库分发的 [macOS 安装包](site/LANMIC_{VERSION}.pkg) 和 [Windows 安装包](site/LANMIC_Setup_{VERSION}.exe)。开发时可从源码构建对应版本；固件与插件需要使用相同的协议版本。
+`site/` 提供随仓库分发的 [macOS 安装包](site/LANMIC_{VERSION}.pkg) 和 [Windows 安装包](site/LANMIC_{VERSION}.exe)。开发时可从源码构建对应版本；固件与插件需要使用相同的协议版本。
 
 已有构建产物可通过脚本安装。以下命令在项目根目录执行：
 
