@@ -205,7 +205,7 @@
 
 <main class="wrap">
   <div id="noSerial" class="note warn" style="display:none">
-    当前浏览器无法连接设备，请使用桌面版 Chrome 或 Edge 打开本页。
+    当前浏览器不支持 Web Serial 与 WebUSB（如 iOS Safari、Firefox），本页无法与设备通信，请使用 Chrome 或 Edge 打开。
   </div>
 
   <div id="banner"></div>
@@ -216,7 +216,7 @@
     </span>
     <b>还没有连接设备</b>
     <p>把 LAN MIC 插入电脑的 USB 口，点右上角「连接设备」，在浏览器弹窗中选择 <code>LAN MIC</code>。</p>
-    <p class="idle-tip">列表里没有设备？拔下来重新插入一次，并使用桌面版 Chrome 或 Edge。</p>
+    <p class="idle-tip">列表里没有设备？拔下来重新插入一次，并使用 Chrome 或 Edge。</p>
   </div>
 
   <div id="panels" hidden>
@@ -504,13 +504,46 @@ function afterOpen() {
   send('info');
 }
 
+// Apple mobile (iPhone/iPad) has neither Web Serial nor WebUSB, so the page
+// just says unsupported there. Everything else uses serial -- native
+// navigator.serial, except on Android where its chooser never lists CDC
+// devices and google's WebSerial polyfill takes over via WebUSB.
+const serialApi = Promise.resolve(
+  /iphone|ipad|ipod/i.test(navigator.userAgent) ? null
+    : navigator.serial && !/android/i.test(navigator.userAgent) ? navigator.serial
+    : navigator.usb ? import('./js/serial.js').then((m) => m.serial) : null
+).catch(() => null); // module failed to load: the page stays unsupported too
+let polyfillOptions; // class codes of the last successful polyfill request
+// The polyfill picker filters by the CDC control-interface class (default 2). A
+// descriptor that labels its interfaces only with the data class 0x0A makes the
+// port throw "Unable to find interface with class N"; retry once with 10/10 --
+// the device is already granted then, so no second picker pops up.
+// shortcut: keyed on the error text, <the polyfill adds error codes, drop the regex>
+const classMiss = (e, opts) => !opts && /class/.test(String(e && e.message));
+async function pickPort(filters) {
+  const api = await serialApi;
+  try { return await api.requestPort({ filters }, polyfillOptions); }
+  catch (e) {
+    if (!classMiss(e, polyfillOptions)) throw e;
+    polyfillOptions = { usbControlInterfaceClass: 10, usbTransferInterfaceClass: 10 };
+    return api.requestPort({ filters }, polyfillOptions);
+  }
+}
+// self-check: only the interface-class miss triggers the retry
+(() => {
+  const cancel = new DOMException('User cancelled', 'NotFoundError');
+  if (!classMiss(new TypeError('Unable to find interface with class 2.'), undefined)
+      || classMiss(cancel, undefined) || classMiss(new TypeError('class'), polyfillOptions))
+    console.error('classMiss self-check failed');
+})();
+
 async function connect() {
-  if (!('serial' in navigator)) { $('noSerial').style.display = 'block'; return; }
+  if (!await serialApi) { banner('err', '当前浏览器不支持 Web Serial 与 WebUSB，无法与设备通信，请使用 Chrome 或 Edge'); return; }
   try {
     // The manual path always opens the picker: a stale grant from an unplugged
     // device must not hide the list of devices. The filter narrows the list to
     // LAN MIC units, so Bluetooth / audio / other serial grants stay out of it.
-    port = await navigator.serial.requestPort({ filters: [LM_FILTER] });
+    port = await pickPort([LM_FILTER]);
     await port.open({ baudRate: 115200 }); // the device ignores the speed
     afterOpen();
   } catch (e) {
@@ -536,10 +569,12 @@ const LM_FILTER = { usbVendorId: 0xcafe, usbProductId: 0x4002 };
 const isLanMic = (p) => { const i = p.getInfo(); return i.usbVendorId === LM_FILTER.usbVendorId && i.usbProductId === LM_FILTER.usbProductId; };
 let autoBusy = false;
 async function autoConnect() {
-  if (!('serial' in navigator) || port || reader || autoBusy || flashing()) return;
+  if (port || reader || autoBusy || flashing()) return;
+  const api = await serialApi;
+  if (!api) return;
   autoBusy = true;
   try {
-    for (const p of await navigator.serial.getPorts()) {
+    for (const p of await api.getPorts(polyfillOptions)) {
       if (!isLanMic(p)) continue;
       try { await p.open({ baudRate: 115200 }); port = p; afterOpen(); return; }
       catch { /* device not plugged in: try the next grant */ }
@@ -634,11 +669,11 @@ const buildFileArray = (parts, buffers) => parts.map((p, i) => ({ data: buffers[
   if (r[0].address !== 32768 || r[1].address !== 0 || r[1].data !== 'B') console.error('buildFileArray self-check failed');
 })();
 $('btnFlash').onclick = async () => {
-  if (!('serial' in navigator)) {
-    banner('err', '当前浏览器无法更新固件：请使用桌面版 Chrome 或 Edge，并通过 HTTPS 打开本页');
+  if (!await serialApi) { // native serial or the WebUSB polyfill both work for esptool-js
+    banner('err', '当前浏览器无法更新固件：请使用 Android/PC/MacOS Chrome 或 Edge');
     return;
   }
-  if (!flashParts) { banner('err', '无法读取 firmware/manifest.json，请通过 http(s) 地址打开本页'); return; }
+  if (!flashParts) { banner('err', '无法读取 firmware/manifest.json'); return; }
   if (connected) await disconnect();
   flashingNow = true;
   $('btnFlash').disabled = true;
@@ -650,7 +685,7 @@ $('btnFlash').onclick = async () => {
   let transport = null;
   try {
     // pick the port before import() so the click's user activation is still fresh
-    const device = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x303a, usbProductId: 0x1001 }] });
+    const device = await pickPort([{ usbVendorId: 0x303a, usbProductId: 0x1001 }]);
     const { ESPLoader, Transport } = await import('https://unpkg.com/esptool-js@0.7.1/bundle.js');
     transport = new Transport(device, true);
     const esp = new ESPLoader({
@@ -700,12 +735,12 @@ $('btnFlash').onclick = async () => {
   }
 };
 fillInfo();
-if (!('serial' in navigator)) {
-  $('noSerial').style.display = 'block';
-} else {
-  autoConnect(); // paired device already plugged in: connect without a click
-  navigator.serial.addEventListener('connect', autoConnect); // ...or plug it in later
-}
+(async () => {
+  const api = await serialApi;
+  if (!api) { $('noSerial').style.display = 'block'; return; }
+  if (api.addEventListener) api.addEventListener('connect', autoConnect);
+  autoConnect();
+})();
 </script>
 </body>
 </html>
