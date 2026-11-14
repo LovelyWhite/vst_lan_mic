@@ -55,10 +55,20 @@ OZ0, OZ1 = AXZ - HZ, AXZ + HZ
 # which keeps the relief 0.05 inside the narrowed bore mouth on each side
 FLARE = dict(x=(-2.85, X0 + 1.01), y=(TUBE_Y[0] - 0.05, TUBE_Y[1] + 0.05), z=(ZFL - 0.01, 1.19))
 
-# Button window in the +Y wall (lid side): 2 x 1 mm over the plunger only (measured
-# x 3.768..5.714 z 0.444..1.282), centred on it; the switch body stays covered by the wall.
-WIN = dict(x=(4.741 - 1.0, 4.741 + 1.0), z=(0.863 - 0.5, 0.863 + 0.5),
-           y=(Y1 - 1.0, OY1 + 0.1))
+# Button in the +Y wall (lid side): a dia 1.00 pinhole centred on the plunger tip (measured
+# x 3.768..5.714 y 0.449 z 0.444..1.282, centre 4.741/0.863) through the outer wall; a SIM eject
+# pin (~0.5) goes through it and presses the tip. The tip crosses the cavity face (Y1 = 0.440) by
+# 0.009, so the wall inner face gets a shallow pocket over the plunger, 0.05 per side in x/z plus
+# 0.02 around the hole mouth, with 0.08 in front of the tip; the switch body stays covered.
+WIN = dict(c=(4.741, 0.863), r=0.50,
+           pl=(3.768 - 0.05, 5.714 + 0.05, 0.863 - 0.52, 0.863 + 0.52))
+# antenna zone: the 5.8 mm tail strip at +X (away from the Type-C end). Measured off the mesh the
+# copper tops out at z 0.810 and nothing else in x 22.614..28.414 rises higher. The lid ceiling is
+# at ZTOP = 2.90, floating 2.09 above it, so a pad hangs from the ceiling down to 0.810: line to
+# line on the copper (the lid prints face up on the parting plane, so the pad face is the last
+# layer and prints true). The pad overlaps the ceiling and side walls so the fuse is clean; the
+# outer face stays flat.
+ANT = dict(x=(28.414 - 5.8, X1), z=0.810)
 
 
 def box(x0, x1, y0, y1, z0, z1):
@@ -168,13 +178,17 @@ doc = App.newDocument(doc_name)
 
 HX0, HX1 = OX0 - 0.06, X0 + 0.05            # bore prism: through the -X wall (+ into the chamber)
 hole = port_solid(HX0, HX1, GAP)
-win = box(WIN["x"][0], WIN["x"][1], WIN["y"][0], WIN["y"][1], WIN["z"][0], WIN["z"][1])
+win = Part.makeCylinder(WIN["r"], OY1 + 0.11 - 0.52,          # pinhole, y 0.52..OY1+0.11
+                        App.Vector(WIN["c"][0], 0.52, WIN["c"][1]), App.Vector(0, 1, 0))
+pocket = box(*WIN["pl"][:2], Y1 - 0.01, 0.53, *WIN["pl"][2:])  # plunger relief in the wall face
 # board step: floor is 1.0mm narrower in plan than the cavity, so the ledge top is the
 # board bottom plane and the board drops onto it
 cav_low = box(X0 + 1.0, X1 - 1.0, Y0 + 1.0, Y1 - 1.0, ZFL - 0.01, ZBB)
 # slot for the connector rear flare, and with it the relief under the -X ledge. It starts at
 # x -2.85, inside the wall, so the outer face keeps the clean stadium and nothing squares it off.
 relief = box(*FLARE["x"], *FLARE["y"], *FLARE["z"])
+# lid pad over the antenna strip: drops from the ceiling to ANT["z"] and rides on the copper
+pad = box(ANT["x"][0], X1 + 0.5, Y0 - 0.5, Y1 + 0.5, ANT["z"], ZTOP + 0.5)
 cav_up = box(X0 - WRAP, X1, Y0, Y1, ZBB - 0.01, PART + 0.06)
 cav_top = box(X0 - WRAP, X1, Y0, Y1, PART, ZTOP)
 # board edge locators: a rib LOC wide against the cavity wall on all four sides, standing on the
@@ -192,7 +206,7 @@ groove, rib = joint_cuts(relief)
 base = shell_fillets(box(OX0, OX1, OY0, OY1, OZ0, PART)
                      .cut(cav_low.fuse([cav_up, relief, groove] + hole)), OZ0).fuse(band)
 lid = shell_fillets(box(OX0, OX1, OY0, OY1, PART, OZ1)
-                    .cut(cav_up.fuse([cav_top, win, relief] + hole)), OZ1).fuse(rib)
+                    .cut(cav_up.fuse([cav_top, win, pocket, relief] + hole)), OZ1).fuse([rib, pad])
 
 for nm, shp in (("Base", base), ("Lid", lid)):
     o = doc.getObject(nm) or doc.addObject("Part::Feature", nm)
@@ -235,9 +249,9 @@ print("outer size %.2f x %.2f x %.2f mm" % (OX1 - OX0, OY1 - OY0, OZ1 - OZ0))
 for (yy, zz, r) in port(GAP):
     print("port y %7.3f..%7.3f z %7.3f..%7.3f r %.2f" % (yy[0], yy[1], zz[0], zz[1], r))
 print("port z centre %.3f, axis %.3f, end-face centre %.3f" % (AXZ, AXZ, (OZ0 + OZ1) / 2))
-print("button window x %.3f..%.3f z %.3f..%.3f = %.2f x %.2f mm"
-      % (WIN["x"][0], WIN["x"][1], WIN["z"][0], WIN["z"][1],
-         WIN["x"][1] - WIN["x"][0], WIN["z"][1] - WIN["z"][0]))
+print("button pinhole dia %.2f at x %.3f z %.3f; pocket %.2f x %.2f x %.2f deep"
+      % (2 * WIN["r"], WIN["c"][0], WIN["c"][1],
+         WIN["pl"][1] - WIN["pl"][0], WIN["pl"][3] - WIN["pl"][2], 0.53 - Y1))
 print("port wall x %.3f..%.3f (%.2f thick), plug proud %.3f, flare relief from x %.3f"
       % (OX0, X0 - WRAP, T, OX0 - PLUG_TIP, FLARE["x"][0]))
 print("volumes mm3: base %.0f lid %.0f" % (base.Volume, lid.Volume))
