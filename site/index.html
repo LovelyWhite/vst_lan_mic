@@ -316,6 +316,7 @@
   .led--reset  { animation: led-half   .15s steps(1, end) infinite; }
   .led--net    { animation: led-half   .25s steps(1, end) infinite; }
   .led--portal { animation: led-half   1s   steps(1, end) infinite; }
+  .led--ota    { animation: led-half   .4s  steps(1, end) infinite; }
   .led--stream { animation: led-pulse  1s   steps(1, end) infinite; }
   .led--error  { animation: led-double 1s   steps(1, end) infinite; }
   .tbl-led td:first-child { white-space: nowrap; }
@@ -640,6 +641,7 @@
         <tbody>
           <tr><td><span class="led led--net"></span><b>快闪，一秒 4 下</b></td><td>正在连 Wi-Fi，稍等几秒就好</td></tr>
           <tr><td><span class="led led--portal"></span><b>慢闪，一秒 1 下</b></td><td>在等你配网：手机连上它的热点「LAN MIC」，给它选好 Wi-Fi 就行</td></tr>
+          <tr><td><span class="led led--ota"></span><b>快闪，一秒 2 下半</b></td><td>正在自动升级固件：别断电，升完会自动重启恢复</td></tr>
           <tr><td><span class="led"></span><b>一直亮</b></td><td>Wi-Fi 连好了，随时可以开始用</td></tr>
           <tr><td><span class="led led--stream"></span><b>一秒短闪 1 下</b></td><td>正在传声音，一切正常</td></tr>
           <tr><td><span class="led led--reset"></span><b>急闪，一秒 7 下</b></td><td>你长按了按键 3 秒：松开就会忘记 Wi-Fi，重新配网</td></tr>

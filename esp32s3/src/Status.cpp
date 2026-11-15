@@ -9,6 +9,7 @@ std::atomic<bool> statusConfigPortalActive{false};
 std::atomic<bool> statusAudioStreaming{false};
 std::atomic<bool> statusResetArmed{false};
 std::atomic<bool> statusError{false};
+std::atomic<bool> statusOtaUpdating{false};
 std::atomic<uint32_t> wifiSnapshotConnected{0};
 std::atomic<uint32_t> wifiSnapshotIpRaw{0};
 
@@ -38,6 +39,10 @@ void statusLedTask(void*) {
         } else if (statusConfigPortalActive.load(std::memory_order_relaxed)) {
             on = ((now / 500) & 1u) == 0;
             pollMs = 125;
+        } else if (statusOtaUpdating.load(std::memory_order_relaxed)) {
+            // Cadence sits between the portal and disconnected blinks.
+            on = ((now / 200) & 1u) == 0;
+            pollMs = 50;
         } else if (!wifiSnapshotConnected.load(std::memory_order_acquire)) {
             on = ((now / 125) & 1u) == 0;
             pollMs = 31;

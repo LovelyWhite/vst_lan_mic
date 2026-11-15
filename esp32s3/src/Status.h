@@ -14,6 +14,7 @@ extern std::atomic<bool> statusConfigPortalActive;
 extern std::atomic<bool> statusAudioStreaming;
 extern std::atomic<bool> statusResetArmed;
 extern std::atomic<bool> statusError;
+extern std::atomic<bool> statusOtaUpdating;
 extern std::atomic<uint32_t> wifiSnapshotConnected;
 extern std::atomic<uint32_t> wifiSnapshotIpRaw;
 

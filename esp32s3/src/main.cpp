@@ -14,6 +14,7 @@
 #include "Console.h"
 #include "DeviceIdentity.h"
 #include "NetworkTask.h"
+#include "OtaTask.h"
 #include "Serial.h"
 #include "Status.h"
 #include "UsbAudio.h"
@@ -155,6 +156,10 @@ void setup() {
     // Wi-Fi modem sleep keeps the IDF default here; audioTask widens it to
     // WIFI_PS_NONE only while USB audio is streaming (see kWifiIdleSleepMs).
     WiFi.setAutoReconnect(true);
+    // Silent OTA blocks here on purpose: booting stalls until the manifest is
+    // checked, and a newer image is flashed and rebooted into before any
+    // audio or network task exists.
+    otaBootUpdate();
     xTaskCreateStaticPinnedToCore(audioTask, "sos-audio", sizeof(audioTaskStack),
                                   nullptr, 4, audioTaskStack, &audioTaskControl, 0);
     networkTaskHandle = xTaskCreateStaticPinnedToCore(
