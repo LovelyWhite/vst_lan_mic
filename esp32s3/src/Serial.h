@@ -11,7 +11,7 @@
 #include <USBCDC.h>
 #include <esp32-hal-tinyusb.h> // TinyUSB's non-blocking CDC TX FIFO calls
 #include <Arduino.h>
-#define LANMIC_ENABLE_SERIAL
+// #define LANMIC_ENABLE_SERIAL
 
 // The object itself is defined in main.cpp; with ARDUINO_USB_CDC_ON_BOOT=0
 // the core provides no USBSerial instance of its own.

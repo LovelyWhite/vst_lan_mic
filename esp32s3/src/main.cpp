@@ -51,10 +51,7 @@ static_assert(sizeof(audioTaskStack) == 16384, "Keep the doubled audio stack bud
 
 using namespace lanmic;
 
-#ifdef LANMIC_ENABLE_SERIAL
 USBCDC USBSerial; // Definition for the extern declaration in Serial.h.
-#endif
-
 BoundedCdcPrint cdcSerial; // Definition for the extern declaration in Serial.h.
 
 void setup() {
