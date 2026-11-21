@@ -1,74 +1,88 @@
-"""Build PCB1 plug-in enclosure for FDM on a 0.4 nozzle: base + bonded lid, no screw, no snap.
-Every printed feature is >= 0.40 (one line); board locators and the bonded stop are modelled at 0.05
-per side, which the measured 0.4-nozzle kerf (~0.03/side) opens to about 0.08 assembled. Coords in PCB space (mm)."""
+"""Build PCB1 plug-in enclosure for FDM on a 0.4 nozzle: body cup + bonded -X lid, no screw, no snap.
+The parting plane is vertical at x = PX: the body wraps the PCB on five sides and the board slides
+in along +X; the lid is the Type-C end cap carrying the port and the joint ring groove.
+Board locating is by two edge slots, not ribs: a tail socket in the body +X wall (1.75 tall =
+board 0.83 + antenna stack 0.92) and a front slot in the lid (0.83 tall = board). Both are line to
+line on the measured board, so the board is clamped at both ends with no rattle; the printer kerf
+(~0.03/side) opens them to a slide fit. Body prints +X face down. Lid prints parting-face UP (bed
+= Type-C face, grows +X) with NO support: the end is a smooth lofted nose (tongue stadium -> full
+section at the groove start) whose outward growth stays <=45 deg from the print axis; the flare
+relief closes with a steep taper so no cavity ceiling is a 90 deg overhang; port bore vertical.
+Coords in PCB space (mm)."""
 import FreeCAD as App
-import Part, Mesh, os
+import Part, Mesh, os, math
 
 OUT = "/Users/lw/work/vst_lan_mic/enclosure"
 OBJ = "/Users/lw/work/vst_lan_mic/enclosure/3D_PCB1_2026-11-09.obj"
 
-# --- measured envelope (mm) ---
-# PCB   x 0.015..28.414  y -16.061..-0.010  z -0.800..0.000 (board was 1.0 thick, now 0.8)
-# USB-C plug (part_02): metal tube y -12.173..-3.923 z -1.515..0.775 (axis z -0.43), tip at
-#   x -10.485. The user wants 7.40 mm of the plug proud of the end face, so the shell ends at
-#   x -3.085 (WRAP = 1.20 over the tube). Behind the tube its shell body flares in z to
-#   -2.00..1.13 while staying inside the bore in y (-12.10..-4.00), and reaches forward to
-#   x -2.923. It still fits the stadium bore up to x -2.85, so the bore stays a pure stadium for
-#   the outer 0.24 of the wall and opens to a slot behind it (see "relief").
-# Button (part_00) plunger tip past board edge: x 3.768..5.714 y 0.449 z 0.444..1.282
-# Tallest part = shield can (part_01) z 2.400. Nothing but the button passes y = -0.010.
-CLEAR = 0.45          # board edge to cavity wall, per side: a 0.40 locating rib + 0.05 model gap
-LOC = 0.40            # locating rib width in plan (one line), welded to the cavity wall below PART
-T = 2.00              # wall thickness, five 0.4 passes
-PART = 0.05           # parting plane, just above board top
-RV, RH = 2.00, 1.50   # outer corner / outer rim fillet radii
+# --- measured board (user caliper, mm) ---
+BL, BW, BT = 28.48, 16.80, 0.83     # length / width / thickness
+ANT_T = 0.92                        # antenna stack above board top at the tail
+TAIL = BT + ANT_T                   # 1.75 tail stack height
+BX0 = 0.015                         # board front edge (connector datum)
+BX1 = BX0 + BL                      # board rear edge 28.495
+BCY = -8.0355                       # mesh board centre in y; actual width centred on it
+BY0, BY1 = BCY - BW / 2, BCY + BW / 2
+BZ1 = 0.0                           # board top
+BZ0 = BZ1 - BT                      # board bottom -0.83
+GAPX = 0.00                         # board rear edge to tail-socket bottom: line to line (no play)
+ENG = 2.00                          # tail engagement: how far the tail sits into the socket
 
-X0, X1 = 0.015 - CLEAR, 28.414 + CLEAR       # cavity plan  -0.285 .. 28.714
-Y0, Y1 = -16.061 - CLEAR, -0.010 + CLEAR     #                -16.361 .. 0.290
-ZFL, ZBB = -2.000 - 0.80, -0.800             # cavity floor (lowest part -2.00) / board bottom
-ZTOP = 2.400 + 0.50                          # cavity ceiling
-# Derived, not a free knob: the end face sits so the plug stays PROUD mm out of the shell (the user's
-# 7.40), whatever CLEAR is. With CLEAR 0.45 this lands on the same x -3.085 as before.
-PLUG_TIP = -10.485     # front end of the USB-C metal tube
-PROUD = 7.40
-WRAP = X0 - T - PLUG_TIP - PROUD             # extra shell length past the cavity on -X
-OX0, OX1 = X0 - T - WRAP, X1 + T
+# --- component envelope (mesh, mm) ---
+# USB-C plug: metal tube y -12.173..-3.923 z -1.600..0.810 (2.41 tall), tip x -10.485; stands 7.2
+#   proud of the end face. Rear flare z -2.00..1.20, y -12.10..-4.00, forward tip x -2.923,
+#   envelope ends ~x 0.60.
+# Button plunger tip x 3.750..5.750 y 0.449 z 0.410..1.310. Shield can z 2.420, x ..21.840
+#   (stops well before the tail socket top lip). Nothing but the button passes the board +Y edge.
+CLEAR = 0.45          # board edge to cavity wall air (no ribs; locating is by the two slots)
+T = 2.44              # = LAND 0.84 + GRO_W 0.82 + inner 0.78; outer wall min 0.84 (was 0.4/0.8)
+RV, RH = 2.00, 0.80   # outer corner / outer rim fillet radii (RH < T so the rim stays solid)
+
+X0, X1 = BX0 - CLEAR, BX1 + GAPX     # cavity plan; +X wall inner face = tail-socket bottom
+Y0, Y1 = BY0 - CLEAR, BY1 + CLEAR
+ZFL = -2.000 - 0.80                  # cavity floor (lowest part -2.00)
+ZTOP = 2.420 + 0.50                  # cavity ceiling (tallest part = shield can 2.420)
+PLUG_TIP = -10.485
+FLARE_X0 = -2.93                   # flare relief start, just ahead of the flare tip (-2.923)
+PROUD = 7.20                       # plug must stand >= 7.2 proud of the end face (cased phone)
+OX0 = PLUG_TIP + PROUD             # end face -3.285; port lip = FLARE_X0-OX0 = 0.355
+OX1 = X1 + T
 OY0, OY1 = Y0 - T, Y1 + T
 
-# --- USB-C port (male plug) in the -X wall ---
-# Shell is symmetric about the connector axis, so the port is centred on the end face AND on the
-# metal shell. Per the user the plug is exactly 2.40 thick: the opening is cut line to line on that
-# height in z -- the printer opened cuts ~0.03 per side in the stop tests, which is the whole z
-# clearance and leaves no visible gap above or below the shell. Only y keeps GAP air so the plug can
-# slide in. The tube still shoulders on the end face in x.
-# HZ keeps both slabs > RH so the bottom/top rim fillets stay fillets (bottom 5.38, top 4.42).
-# The wall is T long; the connector flare no longer fits that bore behind x -2.85, so RELIEF opens
-# the back of the wall to the flare envelope and the outer 0.23 stays a pure stadium lip.
-AXZ = -0.43            # connector shell axis: tube measures z -1.515..0.775 (2.29..2.42 tall)
-PH = 2.40              # plug shell thickness per the user: the port matches it line to line
-TUBE_Y = (-12.173, -3.923)
-GAP = 0.05             # y air per side on the 8.28-wide shell; z is line to line on PH
-HZ = 4.90
-OZ0, OZ1 = AXZ - HZ, AXZ + HZ
-# rear flare of the connector: z -2.000..1.130 (the stadium bore stops at -1.720..0.860) while
-# its y -12.10..-4.00 stays inside the bore; opened behind x -2.85 with 0.05 air around the body,
-# which keeps the relief 0.05 inside the narrowed bore mouth on each side
-FLARE = dict(x=(-2.85, X0 + 1.01), y=(TUBE_Y[0] - 0.05, TUBE_Y[1] + 0.05), z=(ZFL - 0.01, 1.19))
+# --- vertical parting plane ---
+# The nose taper runs from the Type-C face to the bond-groove start (PX-GRO_D), so the groove sits
+# on full section. PX stays ahead of the button pinhole (front edge 4.25): hole wholly in body.
+# The lid is a ~7 mm end cap clearing the shield-can front + plunger (upper chamber below).
+PX = 4.05
 
-# Button in the +Y wall (lid side): a dia 1.00 pinhole centred on the plunger tip (measured
-# x 3.768..5.714 y 0.449 z 0.444..1.282, centre 4.741/0.863) through the outer wall; a SIM eject
-# pin (~0.5) goes through it and presses the tip. The tip crosses the cavity face (Y1 = 0.440) by
-# 0.009, so the wall inner face gets a shallow pocket over the plunger, 0.05 per side in x/z plus
-# 0.02 around the hole mouth, with 0.08 in front of the tip; the switch body stays covered.
-WIN = dict(c=(4.741, 0.863), r=0.50,
-           pl=(3.768 - 0.05, 5.714 + 0.05, 0.863 - 0.52, 0.863 + 0.52))
-# antenna zone: the 5.8 mm tail strip at +X (away from the Type-C end). Measured off the mesh the
-# copper tops out at z 0.810 and nothing else in x 22.614..28.414 rises higher. The lid ceiling is
-# at ZTOP = 2.90, floating 2.09 above it, so a pad hangs from the ceiling down to 0.810: line to
-# line on the copper (the lid prints face up on the parting plane, so the pad face is the last
-# layer and prints true). The pad overlaps the ceiling and side walls so the fuse is clean; the
-# outer face stays flat.
-ANT = dict(x=(28.414 - 5.8, X1), z=0.810)
+# --- USB-C port (male plug) in the lid -X wall ---
+AXZ = -0.395           # tube measured centre (z -1.600..0.810)
+PH = 2.50              # bore height: tube is 2.41 tall, so 2.50 leaves ~0.045 air per side
+TUBE_Y = (-12.173, -3.923)
+GAP = 0.05             # y air per side; z air ~0.045/side from the 2.50 bore on the 2.41 tube
+# Cased-phone clearance: no added boss (that would shorten plug reach); the end shoulders taper
+# back around a central stadium tongue (same silhouette as the port, uniform ring width).
+# Parting-UP print (bed = Type-C face, grows +X): every outer wall may grow outward at most 45 deg
+# from the print axis. A slim tongue would need >45 deg to reach the full section in the available
+# length, so the ring is thickened to 2.85 and the nose runs all the way to the bond-groove start.
+TONGUE_WALL = 2.85
+TONGUE_W = (TUBE_Y[1] - TUBE_Y[0]) + 2 * GAP + 2 * TONGUE_WALL
+TONGUE_H = PH + 2 * TONGUE_WALL
+TCY = (TUBE_Y[0] + TUBE_Y[1]) / 2
+# end faces sit T beyond the cavity floor/ceiling (thin wall); the port is no longer centred on
+# the end face in z, which is cosmetic only
+OZ0, OZ1 = ZFL - T, ZTOP + T
+# Recess receiving the connector rear flare, from just ahead of its forward tip to the parting
+# plane; keeps the outer face a clean stadium lip. The flare never crosses PX. The recess floor
+# sits at the ACTUAL flare bottom (-2.00) + 0.05 air, not the cavity floor: a deeper recess would
+# dip below the stadium tongue and open a hole through the shaved bottom shoulder.
+FLARE = dict(x=(FLARE_X0, PX + 0.06), y=(TUBE_Y[0] - 0.05, TUBE_Y[1] + 0.05), z=(-2.05, 1.25))
+
+# Button in the +Y wall (body): dia 1.00 pinhole on the plunger tip; the tip stays inside the
+# cavity face, so no pocket is needed.
+WIN = dict(c=(4.750, 0.860), r=0.50)
+# No antenna hold-down pad: it would block the +X slide-in; the tail socket top lip (z 0.92)
+# rides line to line on the antenna stack instead.
 
 
 def box(x0, x1, y0, y1, z0, z1):
@@ -90,7 +104,7 @@ def prism_x(x0, x1, yy, zz, r):
 
 
 def port(g):
-    """(yy, zz, r) of the connector silhouette: y grown by g, z line to line on the 2.40 shell."""
+    """(yy, zz, r) of the connector silhouette: y grown by g, z = 2.40 bore on the tube axis."""
     # 0.02 flat: OCCT rejects a fillet radius exactly equal to half the box height
     return [((TUBE_Y[0] - g, TUBE_Y[1] + g),
              (AXZ - PH / 2, AXZ + PH / 2), PH / 2 - 0.02)]
@@ -100,75 +114,67 @@ def port_solid(x0, x1, g):
     return [prism_x(x0, x1, yy, zz, r) for yy, zz, r in port(g)]
 
 
-# --- bonded joint on the parting face, sized for a 0.4 nozzle ---
-# s is measured inwards from each outer face, so the wall under the parting plane reads, outside in:
-# flat land | locating stop | inner wall. The stop is one ring groove in the base with the lid rib down
-# the middle of it: the rib locates the two halves, the land and the groove mouth keep glue off the
-# outside, and the rib runs FIT clear of the groove in the model: the real clearance is that FIT plus
-# what the printer adds -- it opened the 1.20 groove to a measured 1.26 while the rib prints true, so
-# FIT 0.05 assembles at ~0.08 per side: a shade looser than line to line, still no rattle, and the glue
-# film gets room. No dam, no bleed holes: the halves close on the land, not on glue.
-# LAND + GRO_W + INNER = T, and each of them is a whole number of 0.4 passes. Both halves print face up
-# on the parting plane. Corner arcs of every
-# frame follow the outer R2 (their radius shrinks by s), so nothing breaks through at the corners and
-# the parting plane keeps a flat outside margin with no witness mark.
-LAND = 0.40                  # smooth margin from the outer face to the groove mouth (one line)
-GRO_W, GRO_D = 1.20, 1.60    # groove in the base: width in plan, depth below the parting plane
-FIT = 0.05                   # model gap per side; ~0.08 assembled after the measured groove opening
-RIB_W, RIB_H = GRO_W - 2 * FIT, GRO_D - 0.40    # rib 1.10 x 1.20; 0.40 left under it in the groove
+# --- bonded joint on the vertical parting face, sized for a 0.4 nozzle ---
+# flat land | ring groove (lid) receiving the rib (body) | inner wall. The bond ring is 0.82 wide
+# (two+ lines) so it does not snap; land 0.84 + ring 0.82 + inner 0.78 = T. FIT 0: rib line to line
+# on the groove in the model; the measured printer opens the groove ~0.06 = clearance + glue room.
+LAND = 0.84           # outer lip of the bond ring = min outer wall 0.84
+GRO_W, GRO_D = 0.82, 1.60
+FIT = 0.00
+RIB_W, RIB_H = GRO_W - 2 * FIT, GRO_D - 0.40
 
 
-def plan_frame(s0, s1, z0, z1):
-    """Ring between two insets from the outer faces, z0..z1 tall; rounded like the shell."""
+def yz_frame(s0, s1, x0, x1):
+    """Ring between two insets from the outer y/z faces, x0..x1 long; rounded like the shell."""
     def ring(s):
-        b = box(OX0 + s, OX1 - s, OY0 + s, OY1 - s, z0, z1)
+        b = box(x0, x1, OY0 + s, OY1 - s, OZ0 + s, OZ1 - s)
         r = RV - s
         if r < 1e-6:
-            return b                     # inset has reached the cavity, whose corners are square
-        es = [e for e in b.Edges if abs(e.tangentAt(e.FirstParameter).z) > 0.99]
+            return b
+        es = [e for e in b.Edges if abs(e.tangentAt(e.FirstParameter).x) > 0.99]
         return b.makeFillet(r, es)
     return ring(s0).cut(ring(s1))
 
 
-def outer_edges(shp):
-    """The 4 outer vertical corner edges (lines lying on two outer box faces);
-    pocket and hole mouths also give short vertical lines, so pin them by position."""
-    out = []
-    for e in shp.Edges:
-        bb = e.BoundBox
-        if bb.XLength > 1e-6 or bb.YLength > 1e-6 or abs(bb.ZMin - bb.ZMax) < 1e-6:
-            continue
-        if min(abs(bb.XMin - OX0), abs(bb.XMin - OX1)) < 1e-6 \
-                and min(abs(bb.YMin - OY0), abs(bb.YMin - OY1)) < 1e-6:
-            out.append(e)
-    assert len(out) == 4, "corner edges found: %d" % len(out)
-    return out
-
-
-def plane_face(shp, z):
-    """Planar face lying in the outer top/bottom plane."""
+def x_face(shp, x):
+    """Planar face lying in the outer end plane x = const."""
     for f in shp.Faces:
         bb = f.BoundBox
-        if abs(bb.ZMin - z) < 1e-6 and abs(bb.ZMax - z) < 1e-6 and bb.ZLength < 1e-6:
+        if abs(bb.XMin - x) < 1e-6 and abs(bb.XMax - x) < 1e-6 and bb.XLength < 1e-6:
             return f
-    raise RuntimeError("no face at z=%.3f" % z)
+    raise RuntimeError("no face at x=%.3f" % x)
 
 
-def shell_fillets(shp, *rims):
-    """R2 on the 4 vertical corners, R1.5 on the outer rim of each given plane (the free
-    face only), so the parting plane keeps a sharp landing and no V groove shows at the
-    seam."""
-    shp = shp.makeFillet(RV, outer_edges(shp))
-    for z in rims:
-        shp = shp.makeFillet(RH, plane_face(shp, z).Edges)
-    return shp
+def shell_fillets(shp, x_end, rim_r=RH):
+    """R2 on the 4 outer X-parallel corner edges; rim_r > 0 also rounds the free end face rim.
+    The lid passes rim_r=0: OCCT refuses both fillet and chamfer on the nose-root ring, so that
+    crease is kept as one clean sharp line (the lofted nose already removes the crater)."""
+    # pin the 4 outer corner edges by position: the tongue/recess adds inner X-parallel edges
+    es = [e for e in shp.Edges
+          if abs(e.tangentAt(e.FirstParameter).x) > 0.99 and e.Length > 1.0
+          and (abs(e.BoundBox.YMin - OY0) < 1e-6 or abs(e.BoundBox.YMax - OY1) < 1e-6)
+          and (abs(e.BoundBox.ZMin - OZ0) < 1e-6 or abs(e.BoundBox.ZMax - OZ1) < 1e-6)]
+    s = shp.makeFillet(RV, es) if es else shp
+    # rim: only the outer perimeter of the end face. Internal rims (tongue root, recess step)
+    # keep their own smaller blends so the fillets do not overlap. rim_r=0 skips it (lofted nose
+    # root ring refuses OCCT fillet/chamfer; it stays a single clean crease).
+    if not rim_r:
+        return s
+    rim = [e for e in s.Edges if e.BoundBox.XLength < 1e-6
+           and abs(e.BoundBox.XMin - x_end) < 1e-6
+           and (e.BoundBox.YLength > 1.0 or e.BoundBox.ZLength > 1.0)
+           and (abs(e.BoundBox.YMin - OY0) < 1e-6 or abs(e.BoundBox.YMax - OY1) < 1e-6
+                or abs(e.BoundBox.ZMin - OZ0) < 1e-6 or abs(e.BoundBox.ZMax - OZ1) < 1e-6)]
+    assert rim, "no rim edges at x=%s" % x_end
+    return s.makeFillet(rim_r, rim)
 
 
-def joint_cuts(flare):
-    """(base groove, lid rib)."""
-    g0, g1 = LAND, LAND + GRO_W                 # locating stop: groove in base, rib on the lid
-    rib = plan_frame(g0 + FIT, g1 - FIT, PART - RIB_H, PART + 0.06).cut(flare)
-    return plan_frame(g0, g1, PART - GRO_D, PART + 0.06), rib
+def joint_cuts():
+    """(lid groove, body rib)."""
+    g0, g1 = LAND, LAND + GRO_W
+    groove = yz_frame(g0, g1, PX - GRO_D, PX + 0.06)
+    rib = yz_frame(g0 + FIT, g1 - FIT, PX - RIB_H, PX + 0.06)
+    return groove, rib
 
 
 doc_name = "PCB1_enclosure"
@@ -176,39 +182,97 @@ if doc_name in App.listDocuments():
     App.closeDocument(doc_name)
 doc = App.newDocument(doc_name)
 
-HX0, HX1 = OX0 - 0.06, X0 + 0.05            # bore prism: through the -X wall (+ into the chamber)
+HX0, HX1 = OX0 - 0.06, X0 + 0.05
 hole = port_solid(HX0, HX1, GAP)
-win = Part.makeCylinder(WIN["r"], OY1 + 0.11 - 0.52,          # pinhole, y 0.52..OY1+0.11
-                        App.Vector(WIN["c"][0], 0.52, WIN["c"][1]), App.Vector(0, 1, 0))
-pocket = box(*WIN["pl"][:2], Y1 - 0.01, 0.53, *WIN["pl"][2:])  # plunger relief in the wall face
-# board step: floor is 1.0mm narrower in plan than the cavity, so the ledge top is the
-# board bottom plane and the board drops onto it
-cav_low = box(X0 + 1.0, X1 - 1.0, Y0 + 1.0, Y1 - 1.0, ZFL - 0.01, ZBB)
-# slot for the connector rear flare, and with it the relief under the -X ledge. It starts at
-# x -2.85, inside the wall, so the outer face keeps the clean stadium and nothing squares it off.
-relief = box(*FLARE["x"], *FLARE["y"], *FLARE["z"])
-# lid pad over the antenna strip: drops from the ceiling to ANT["z"] and rides on the copper
-pad = box(ANT["x"][0], X1 + 0.5, Y0 - 0.5, Y1 + 0.5, ANT["z"], ZTOP + 0.5)
-cav_up = box(X0 - WRAP, X1, Y0, Y1, ZBB - 0.01, PART + 0.06)
-cav_top = box(X0 - WRAP, X1, Y0, Y1, PART, ZTOP)
-# board edge locators: a rib LOC wide against the cavity wall on all four sides, standing on the
-# ledge from the board bottom to the board top, so the PCB cannot drift in x-y; its inner face is
-# CLEAR - LOC off the board, which a shrunk print still clears. The -X run sits in the port relief
-# and is cut away there.
-band = box(X0, X1, Y0, Y1, ZBB, 0.0).cut(
-    box(X0 + LOC, X1 - LOC, Y0 + LOC, Y1 - LOC, ZBB - 0.01, 0.01)).cut(relief)
-# The port relief reaches the parting plane, so the stop is broken where it crosses: on the -X wall
-# the ring stops short of the connector (y -12.37..-3.72) and the two ends
-# of the bead have to be pinched off there. Glue bead: run it along the rib, the 0.30 gaps on both
-# sides hold it, the land and the groove mouth keep it off the outside; the joint is permanent.
-groove, rib = joint_cuts(relief)
+# shoulder relief: end slab minus the smooth nose loft -> no flat crater shoulder, no hard lips
+def rrect(x, y0, y1, z0, z1, r):
+    # rounded-rect wire in plane x (same 8-edge topology as the shell section, so lofts match)
+    k = 0.70710678 * r
+    V = lambda y, z: App.Vector(x, y, z)
+    e = [Part.makeLine(V(y0 + r, z0), V(y1 - r, z0)),
+         Part.Arc(V(y1 - r, z0), V(y1 - r + k, z0 + r - k), V(y1, z0 + r)).toShape(),
+         Part.makeLine(V(y1, z0 + r), V(y1, z1 - r)),
+         Part.Arc(V(y1, z1 - r), V(y1 - r + k, z1 - r + k), V(y1 - r, z1)).toShape(),
+         Part.makeLine(V(y1 - r, z1), V(y0 + r, z1)),
+         Part.Arc(V(y0 + r, z1), V(y0 + r - k, z1 - r + k), V(y0, z1 - r)).toShape(),
+         Part.makeLine(V(y0, z1 - r), V(y0, z0 + r)),
+         Part.Arc(V(y0, z0 + r), V(y0 + r - k, z0 + r - k), V(y0 + r, z0)).toShape()]
+    return Part.Wire(e)
 
-base = shell_fillets(box(OX0, OX1, OY0, OY1, OZ0, PART)
-                     .cut(cav_low.fuse([cav_up, relief, groove] + hole)), OZ0).fuse(band)
-lid = shell_fillets(box(OX0, OX1, OY0, OY1, PART, OZ1)
-                    .cut(cav_up.fuse([cav_top, win, pocket, relief] + hole)), OZ1).fuse([rib, pad])
 
-for nm, shp in (("Base", base), ("Lid", lid)):
+# Smooth nose: loft the tongue stadium up to the full shell section at the bond-groove start, so
+# the groove sits on full section and the outward growth stays <=45 deg from the +X print axis
+# (parting-UP, support-free). No flat recessed shoulder, no crater lips.
+NOSE_END = PX - GRO_D
+# loft end is outset 0.1 past the shell so it cuts the corner cleanly: an exactly-coincident end
+# section leaves zero-area degenerate sliver faces at the nose root (the right-view spike)
+nose = Part.makeLoft([rrect(OX0, TCY - TONGUE_W / 2, TCY + TONGUE_W / 2,
+                            AXZ - TONGUE_H / 2, AXZ + TONGUE_H / 2, TONGUE_H / 2 - 0.02),
+                      rrect(NOSE_END, OY0 - 0.1, OY1 + 0.1, OZ0 - 0.1, OZ1 + 0.1, RV + 0.1)], True)
+shoulder = box(OX0 - 0.1, NOSE_END, OY0 - 1, OY1 + 1, OZ0 - 1, OZ1 + 1).cut(nose)
+win = Part.makeCylinder(WIN["r"], OY1 + 0.11 - (Y1 - 0.01),
+                        App.Vector(WIN["c"][0], Y1 - 0.01, WIN["c"][1]), App.Vector(0, 1, 0))
+# rounded-rect section (r=0.3): no 90 deg vertical corners (FDM corner stress). Parting-UP print:
+# a flat front ceiling/floor would be a 90 deg overhang, so the front closes with a steep z-taper
+# (y stays full width: the flare front face is full width). Mouth left just tall enough for it.
+_fx0, _fx1 = FLARE["x"]
+_fy0, _fy1 = FLARE["y"]
+_fz0, _fz1 = FLARE["z"]
+_mz0, _mz1 = -1.00, 0.20          # mouth clears the flare front face (-0.74..-0.06)
+_run = (_fz1 - _mz1) / 4.0        # 76 deg taper: flare z grows faster than 45 deg near the front
+relief = Part.makeLoft([rrect(_fx0, _fy0, _fy1, _mz0, _mz1, 0.3),
+                        rrect(_fx0 + _run, _fy0, _fy1, _fz0, _fz1, 0.3)], True)
+relief = relief.fuse(prism_x(_fx0 + _run, _fx1, FLARE["y"], FLARE["z"], 0.3))
+# lid front slot: captures the board front edge in y/z (line to line on 16.80 x 0.83) and bottoms
+# on the board front face with no x play (1 micron relief only absorbs mesh/caliper datum noise).
+# Open at the parting plane so the edge slides in as the lid closes.
+lidslot = box(BX0 - 0.001, PX + 0.01, BY0, BY1, BZ0, BZ1)
+# body main chamber, then the tail socket: a rectangular tube at +X whose bore is the tail
+# cross-section (16.80 x 1.75), ENG long, bottomed GAPX behind the board rear edge. The material
+# above/below/beside it forms the socket lips that clamp the tail.
+main = box(PX - 0.01, BX1 - ENG, Y0, Y1, ZFL - 0.01, ZTOP)
+socket = box(BX1 - ENG - 0.01, X1, BY0, BY1, BZ0, BZ0 + TAIL)
+# lid upper chamber: with the parting moved back, the shield-can front (x 2.625..) and the button
+# plunger fall inside the lid, so it needs full-height clearance above the board from there on
+lid_up = box(2.625 - CLEAR, PX + 0.01, Y0, Y1, BZ1 - 0.01, ZTOP)
+groove, rib = joint_cuts()
+
+# The nose top taper IS the top slant (no separate chamfer wedge): one continuous surface from the
+# tongue front to full height at the groove start, <=45 deg from the +X print axis.
+# R2 section corners match the tail (+X) so lid and tail read as one continuous rounded shell.
+lid = shell_fillets(box(OX0, PX, OY0, OY1, OZ0, OZ1).cut(shoulder), NOSE_END, rim_r=0)
+
+
+def blend(shape, edges, r):
+    # remove 90 deg edge rings; fall back to a chamfer if OCCT refuses the fillet
+    if not edges:
+        return shape
+    try:
+        return shape.makeFillet(r, edges)
+    except Exception:
+        try:
+            return shape.makeChamfer(r, edges)
+        except Exception:
+            return shape
+
+
+# generous round on the tongue front rim (stadium arcs already full)
+es = [e for e in lid.Edges
+      if e.BoundBox.XLength < 1e-6 and abs(e.BoundBox.XMin - OX0) < 1e-6
+      and e.BoundBox.YMin > TCY - TONGUE_W / 2 - 0.01
+      and e.BoundBox.YMax < TCY + TONGUE_W / 2 + 0.01
+      and e.BoundBox.ZMin > AXZ - TONGUE_H / 2 - 0.01
+      and e.BoundBox.ZMax < AXZ + TONGUE_H / 2 + 0.01]
+lid = blend(lid, es, 0.6)
+lid = lid.cut(fuse(hole + [relief, lidslot, lid_up, groove]))
+# cove the relief mouth ring so the small remaining front face has no 90 deg edge
+mouth = [e for e in lid.Edges if e.BoundBox.XLength < 1e-6 and abs(e.BoundBox.XMin - _fx0) < 1e-6
+         and e.BoundBox.ZMin > _mz0 - 0.01 and e.BoundBox.ZMax < _mz1 + 0.01]
+lid = blend(lid, mouth, 0.1)   # < the 0.123 y gap so the cove cannot touch the flare front corners
+body = shell_fillets(box(PX, OX1, OY0, OY1, OZ0, OZ1), OX1)
+body = body.cut(main.fuse([socket, win])).fuse([rib])
+
+for nm, shp in (("Body", body), ("Lid", lid)):
     o = doc.getObject(nm) or doc.addObject("Part::Feature", nm)
     o.Shape = shp
 
@@ -222,16 +286,16 @@ for o in doc.Objects:
         pass
 
 # static interference check: PCB mesh vertices inside either shell solid
-bad = {"Base": [], "Lid": []}
+bad = {"Body": [], "Lid": []}
 pts = [(q.x, q.y, q.z) for q in ref.Mesh.Points]
 for x, y, z in pts:
     if X0 < x < X1 and Y0 < y < Y1 and ZFL < z < ZTOP:
         continue          # inside the cavity void, cannot touch either wall
     v = App.Vector(x, y, z)
-    for nm, shp in (("Base", base), ("Lid", lid)):
+    for nm, shp in (("Body", body), ("Lid", lid)):
         if shp.isInside(v, 1e-6, True):
             bad[nm].append((x, y, z))
-print("interference verts: Base=%d Lid=%d" % (len(bad["Base"]), len(bad["Lid"])))
+print("interference verts: Body=%d Lid=%d" % (len(bad["Body"]), len(bad["Lid"])))
 for nm, bp in bad.items():
     if bp:
         print("  %s x %.2f..%.2f y %.2f..%.2f z %.2f..%.2f  e.g. %s" % (
@@ -239,24 +303,49 @@ for nm, bp in bad.items():
             min(q[1] for q in bp), max(q[1] for q in bp),
             min(q[2] for q in bp), max(q[2] for q in bp),
             ["%.2f/%.2f/%.2f" % q for q in bp[:6]]))
-# the locators live inside the cavity, so the skip above never sees them: test them directly
-inb = [q for q in pts if band.isInside(App.Vector(*q), 1e-6, True)]
-print("board verts inside locator band: %d" % len(inb))
-print("joint: land %.2f | groove %.2f x %.2f, rib %.2f x %.2f, model gap %.2f per side (print adds"
-      " ~0.03) | inner wall %.2f"
-      % (LAND, GRO_W, GRO_D, RIB_W, RIB_H, FIT, T - (LAND + GRO_W)))
+# the envelope skip hides the slot walls: test the front region against the lid and the tail
+# region against the body directly (mesh board is a hair under the caliper board, so both clear)
+front = [q for q in pts if q[0] < PX and lid.isInside(App.Vector(*q), 1e-6, False)]
+tail = [q for q in pts if q[0] > BX1 - ENG and body.isInside(App.Vector(*q), 1e-6, False)]
+print("front verts inside lid: %d | tail verts inside body: %d" % (len(front), len(tail)))
+# assembly: the halves must not overlap (rib lives in the groove void), rib must fit the groove
+ov, rg = lid.common(body).Volume, rib.cut(groove).Volume
+print("assembly overlap mm3: %.6f | rib outside groove mm3: %.6f" % (ov, rg))
+assert ov < 1e-3 and rg < 1e-3, "halves interfere or rib misses the groove"
+# nose root must stay solid behind the taper end (no through-hole into the flare seat)
+assert lid.isInside(App.Vector(NOSE_END + 0.1, TCY, -2.6), 1e-6, True), "nose root broken"
+# no degenerate zero-area sliver faces (the right-view spike bug)
+assert all(f.Area > 1e-6 for f in lid.Faces), "degenerate sliver face on lid"
+# parting-UP support-free: nose outward growth <=45 deg from the +X print axis, and the nose must
+# already be >=0.8 wall thick at the board front edge so the board corners are not exposed
+nose_slope = ((OY1 - OY0) / 2 - TONGUE_W / 2) / (NOSE_END - OX0)
+assert nose_slope <= 1.0, "nose overhang >45 deg (needs support)"
+assert TONGUE_W / 2 + nose_slope * (BX0 - OX0) >= BY1 + 0.84, "nose outer wall <0.84 at board front"
+# parting must stay ahead of the button pinhole so the hole is wholly in the body
+assert PX < WIN["c"][0] - WIN["r"], "parting crosses the button pinhole"
+# slide-in: board + flare sections pass the rim opening; shield can stops before the socket lip
+assert Y0 < BY0 and BY1 < Y1 and ZFL - 0.01 < -2.00 and 1.20 < ZTOP
+assert 21.840 < BX1 - ENG and 0.92 < ZTOP
+print("joint: land %.2f | groove %.2f x %.2f (lid), rib %.2f x %.2f (body), gap %.2f/side"
+      % (LAND, GRO_W, GRO_D, RIB_W, RIB_H, FIT))
+print("parting x %.3f | lid %.2f long, body %.2f long" % (PX, PX - OX0, OX1 - PX))
+print("board %.2f x %.2f x %.2f | tail socket %.2f tall x %.2f eng | lid slot %.2f tall"
+      % (BL, BW, BT, TAIL, ENG, BT))
 print("outer size %.2f x %.2f x %.2f mm" % (OX1 - OX0, OY1 - OY0, OZ1 - OZ0))
 for (yy, zz, r) in port(GAP):
     print("port y %7.3f..%7.3f z %7.3f..%7.3f r %.2f" % (yy[0], yy[1], zz[0], zz[1], r))
-print("port z centre %.3f, axis %.3f, end-face centre %.3f" % (AXZ, AXZ, (OZ0 + OZ1) / 2))
-print("button pinhole dia %.2f at x %.3f z %.3f; pocket %.2f x %.2f x %.2f deep"
-      % (2 * WIN["r"], WIN["c"][0], WIN["c"][1],
-         WIN["pl"][1] - WIN["pl"][0], WIN["pl"][3] - WIN["pl"][2], 0.53 - Y1))
-print("port wall x %.3f..%.3f (%.2f thick), plug proud %.3f, flare relief from x %.3f"
-      % (OX0, X0 - WRAP, T, OX0 - PLUG_TIP, FLARE["x"][0]))
-print("volumes mm3: base %.0f lid %.0f" % (base.Volume, lid.Volume))
-print("solids: base %d lid %d" % (len(base.Solids), len(lid.Solids)))
+print("button pinhole dia %.2f at x %.3f z %.3f" % (2 * WIN["r"], WIN["c"][0], WIN["c"][1]))
+# printability, lid PARTING-UP (bed = Type-C face, grows +X), NO support: outer walls may grow
+# outward at most 45 deg from the print axis; cavity ceilings likewise. Port bore stays vertical.
+relief_from_vert = math.degrees(math.atan(_run / (_fz1 - _mz1)))
+assert nose_slope <= 1.0 and relief_from_vert <= 45, "overhang >45 deg (needs support)"
+print("lid parting-UP no-support: nose %.1f deg, relief ceiling %.1f deg from print axis (<=45)"
+      % (math.degrees(math.atan(nose_slope)), relief_from_vert))
+print("volumes mm3: body %.0f lid %.0f" % (body.Volume, lid.Volume))
+print("solids: body %d lid %d" % (len(body.Solids), len(lid.Solids)))
 
 os.makedirs(OUT, exist_ok=True)
 doc.saveAs(os.path.join(OUT, "PCB1_enclosure.FCStd"))
+Mesh.export([doc.getObject("Body"), doc.getObject("Lid")],
+            os.path.join(OUT, "PCB1_enclosure.3mf"))
 print("saved to", OUT)
