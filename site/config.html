@@ -121,6 +121,10 @@
     font-family: var(--mono); transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
   }
   input[type=text]:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(89, 217, 193, .18); }
+  input[type=range] { flex: 1 1 220px; min-width: 0; height: 23px; accent-color: var(--accent); cursor: pointer; }
+  input[type=range]:disabled { opacity: .5; cursor: not-allowed; }
+  .buf-val { flex: none; min-width: 64px; text-align: right; font-family: var(--mono); font-size: 13px; font-weight: 500; }
+  .buf-val.ph { color: var(--dim); font-weight: 400; }
   .sw-row { display: flex; align-items: center; gap: 14px; padding: 11px 14px; margin-bottom: 10px; border: 1px solid var(--line-soft); border-radius: var(--radius); background: var(--inset); }
   .sw-row .txt { min-width: 0; }
   .sw-row .txt b { font-size: 14px; font-weight: 500; }
@@ -247,6 +251,15 @@
   </div>
 
   <div class="card">
+    <h2>播放缓冲</h2>
+    <div class="row">
+      <input type="range" id="bufIn" min="20" max="520" step="20" value="300" disabled>
+      <b class="buf-val ph" id="bufVal">—</b>
+    </div>
+    <p class="hint">DAW 到手机方向的缓冲目标（20–520 毫秒）。调低延迟更小但更怕网络抖动，调高更稳；松开即自动保存，立即生效并记住</p>
+  </div>
+
+  <div class="card">
     <h2>维护</h2>
     <div class="row">
       <button class="btn btn-danger" id="btnErase" disabled>清除 WiFi 凭据</button>
@@ -310,8 +323,8 @@ function takeLines(chunk) {
 
 const $ = id => document.getElementById(id);
 const esc = v => String(v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-// info fields arrive positionally as OK|info|dev|sn|ses|ver|up|wip|wrssi|wssid|wgw|name|ein|eout;
-// network fields are empty when the device is offline, name/ein/eout have their own cards.
+// info fields arrive positionally as OK|info|dev|sn|ses|ver|up|wip|wrssi|wssid|wgw|name|ein|eout|buf;
+// network fields are empty when the device is offline, name/ein/eout/buf have their own cards.
 const INFO_KEYS = ['dev', 'sn', 'ses', 'ver', 'up', 'wip', 'wrssi', 'wssid', 'wgw', 'name'];
 const LABELS = {
   dev: '设备标识', sn: '序列号', ses: '会话编号', ver: '版本号', up: '已运行',
@@ -323,19 +336,24 @@ const GROUPS = {
   '网络': ['wip', 'wrssi', 'wssid', 'wgw'],
 };
 const UNITS = { up: 'ms', wrssi: 'dBm' };
-const ACTS = { info: '获取设备信息', name: '设备名称', epin: '接收 DAW 输入', epout: '转接设备音频', erase: '清除 WiFi 凭据', reboot: '重启设备' };
+const ACTS = { info: '获取设备信息', name: '设备名称', epin: '接收 DAW 输入', epout: '转接设备音频', buf: '播放缓冲', erase: '清除 WiFi 凭据', reboot: '重启设备' };
 
 let port = null, reader = null, connected = false;
 let pending = null;                 // { cmd, timer }
 let bannerTimer = 0;                // the toast hides itself again
 const queue = [];                   // lines waiting to be sent
 const ep = { ein: null, eout: null }; // last values known from the device
+let bufMs = null;                     // last playout target known from the device
 const ACT_IDS = ['btnSsidSet', 'btnErase', 'btnReboot', 'btnRefresh'];
 const CMD_BTN = { name: 'btnSsidSet', erase: 'btnErase', reboot: 'btnReboot' };
 const BUSY_TXT = { name: '保存中', erase: '清除中', reboot: '重启中' };
 // Text labels are cached so the loading wording can be undone; btnRefresh holds an icon and is left alone.
 const BTN_TEXT = {};
 for (const id of ['btnSsidSet', 'btnErase', 'btnReboot']) BTN_TEXT[id] = $(id).textContent;
+const paintBuf = () => {
+  $('bufVal').textContent = bufMs === null ? '—' : bufMs + ' ms';
+  $('bufVal').classList.toggle('ph', bufMs === null);
+};
 
 function banner(kind, text) {
   const el = $('banner');
@@ -356,8 +374,8 @@ function setBusy() {
     if (!(id in BTN_TEXT)) continue;
     $(id).textContent = on ? BUSY_TXT[pending.cmd] || BTN_TEXT[id] : BTN_TEXT[id];
   }
-  // Switches apply on change, so they lock while a write is in flight.
-  $('chkIn').disabled = $('chkOut').disabled = busy || !connected;
+  // Switches and the buffer slider apply on change, so they lock while a write is in flight.
+  $('chkIn').disabled = $('chkOut').disabled = $('bufIn').disabled = busy || !connected;
   $('btnRefresh').classList.toggle('spin', busy);
 }
 function setConnected(on) {
@@ -464,6 +482,9 @@ function render(r) {
     ep.ein = obj.ein; ep.eout = obj.eout;
     devVer = obj.ver || null; paintUpdateCard();
     $('chkIn').checked = obj.ein; $('chkOut').checked = obj.eout;
+    bufMs = r.f[12] ? Number(r.f[12]) : null; // old firmware has no buf field
+    if (bufMs !== null) $('bufIn').value = bufMs;
+    paintBuf();
     banner('ok', '设备信息已更新');
     return;
   }
@@ -478,6 +499,13 @@ function render(r) {
     ep[k] = r.f[0] === '1';
     $('chkIn').checked = ep.ein; $('chkOut').checked = ep.eout;
     banner('ok', ACTS[cmd] + '已' + (ep[k] ? '开启' : '关闭') + (r.restart ? '，重启后生效' : ''));
+    return;
+  }
+  if (cmd === 'buf') {
+    bufMs = Number(r.f[0]);
+    $('bufIn').value = bufMs;
+    paintBuf();
+    banner('ok', '播放缓冲已设为 ' + r.f[0] + ' ms，立即生效');
     return;
   }
   if (cmd === 'erase') { banner('warn', '已清除 WiFi 凭据，点击「重启设备」后设备重新进入配网'); return; }
@@ -609,6 +637,14 @@ $('btnSsidSet').onclick = () => {
     return;
   }
   send('name ' + v);
+};
+// Range mirrors the firmware clamp (20 ms .. Playout::maxTargetMs on ESP32).
+// The label tracks the thumb while dragging; the command goes out on release.
+$('bufIn').oninput = () => { $('bufVal').textContent = $('bufIn').value + ' ms'; $('bufVal').classList.remove('ph'); };
+$('bufIn').onchange = () => {
+  if (bufMs === null) { banner('warn', '正在获取设备状态，请稍候'); paintBuf(); return; }
+  const v = Number($('bufIn').value);
+  if (v !== bufMs) send('buf ' + v); else paintBuf();
 };
 // A switch flip writes right away; the device state arrives with info, so a flip before that is ignored.
 function applyEp() {

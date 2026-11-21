@@ -1,6 +1,6 @@
 {
   "name": "LAN MIC",
-  "version": "v1.0.0",
+  "version": "v1.1.0",
   "builds": [
     {
       "chipFamily": "ESP32-S3",

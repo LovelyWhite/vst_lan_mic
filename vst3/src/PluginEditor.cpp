@@ -17,6 +17,7 @@ constexpr int kFooterBlock = kRowGap + kFooterHeight;
 constexpr int kBaseHeight = 2 * kMargin + kTitleHeight + kDirectionHeight + kHeaderGap
     + kControlHeight + kRowGap   // device row
     + kControlHeight + kRowGap   // gain row
+    + (BridgeProcessor::sending ? 0 : kControlHeight + kRowGap) // buffer row (Return)
     + kToggleHeight + kRowGap    // network switch
     + kStatusHeight;             // status pill
 
@@ -66,15 +67,18 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
     device_.setColour(juce::ComboBox::arrowColourId, kAccent);
     device_.setTitle("Device");
 
-    gain_.setSliderStyle(juce::Slider::LinearHorizontal);
-    gain_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 84, kControlHeight - 6);
-    gain_.setTextValueSuffix(" dB");
-    gain_.setColour(juce::Slider::trackColourId, kBorder);
-    gain_.setColour(juce::Slider::thumbColourId, kAccent);
-    gain_.setColour(juce::Slider::textBoxTextColourId, kText);
-    gain_.setColour(juce::Slider::textBoxBackgroundColourId, kPanel);
-    gain_.setColour(juce::Slider::textBoxOutlineColourId, kBorder);
-    gain_.setTitle("Network gain");
+    const auto styleSlider = [](juce::Slider& slider, const char* title, const char* suffix) {
+        slider.setSliderStyle(juce::Slider::LinearHorizontal);
+        slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 84, kControlHeight - 6);
+        slider.setTextValueSuffix(suffix);
+        slider.setColour(juce::Slider::trackColourId, kBorder);
+        slider.setColour(juce::Slider::thumbColourId, kAccent);
+        slider.setColour(juce::Slider::textBoxTextColourId, kText);
+        slider.setColour(juce::Slider::textBoxBackgroundColourId, kPanel);
+        slider.setColour(juce::Slider::textBoxOutlineColourId, kBorder);
+        slider.setTitle(title);
+    };
+    styleSlider(gain_, "Network gain", " dB");
 
     enabled_.setColour(juce::ToggleButton::textColourId, kText);
     enabled_.setColour(juce::ToggleButton::tickColourId, kAccent);
@@ -96,6 +100,16 @@ BridgeEditor::BridgeEditor(BridgeProcessor& processor)
         processor.parameters, "gain", gain_);
     enabledAttachment_ = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
         processor.parameters, "enabled", enabled_);
+    if constexpr (!BridgeProcessor::sending) {
+        bufferLabel_.setText("Buffer target", juce::dontSendNotification);
+        bufferLabel_.setFont(juce::FontOptions(13.0f));
+        bufferLabel_.setColour(juce::Label::textColourId, kMuted);
+        styleSlider(buffer_, "Buffer target", " ms");
+        addAndMakeVisible(bufferLabel_);
+        addAndMakeVisible(buffer_);
+        bufferAttachment_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+            processor.parameters, "bufferMs", buffer_);
+    }
     device_.onChange = [this] {
         const int index = device_.getSelectedId() - 2;
         processor_.network.setPreferredDevice(index >= 0 && index < deviceIds_.size()
@@ -139,6 +153,12 @@ void BridgeEditor::resized() {
     gainLabel_.setBounds(gainRow.removeFromLeft(kLabelWidth));
     gain_.setBounds(gainRow);
     area.removeFromTop(kRowGap);
+    if constexpr (!BridgeProcessor::sending) {
+        auto bufferRow = area.removeFromTop(kControlHeight);
+        bufferLabel_.setBounds(bufferRow.removeFromLeft(kLabelWidth));
+        buffer_.setBounds(bufferRow);
+        area.removeFromTop(kRowGap);
+    }
     auto switchRow = area.removeFromTop(kToggleHeight);
     enabled_.setBounds(switchRow.removeFromLeft(210));
     area.removeFromTop(kRowGap);

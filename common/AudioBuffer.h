@@ -91,9 +91,14 @@ public:
     // high-water trim every network stall ratchets playout latency up for good.
     static constexpr uint32_t highWater =
         target + uint32_t(kSampleRate) / 1000 * 150 * uint32_t(Channels);
+    // Largest runtime target whose high-water mark still fits the queue.
+    static constexpr uint32_t maxTargetMs =
+        (uint32_t(queueCapacity) - uint32_t(kSampleRate) / 1000 * 150 * uint32_t(Channels) - 1) /
+        uint32_t(kOpusFrameSamples * size_t(Channels)) * kOpusFrameDurationMs;
     static_assert(target + kOpusFrameSamples * uint32_t(Channels) < queueCapacity,
                   "Playout queue is too small");
     static_assert(highWater < queueCapacity, "High-water trim must leave headroom");
+    static_assert(maxTargetMs >= targetMs, "Default target must be reachable");
     SpscRing<int16_t, queueCapacity> queue;
     // Functional backpressure signal: prepare() trims when it differs from
     // handledOverflows_; not a display counter.
@@ -112,6 +117,14 @@ public:
         nominalRatio_ = std::max(0.125f, std::min(8.0f, ratio));
         ratio_ = nominalRatio_;
     }
+    // Any thread may store; the consumer picks the new target up on its next
+    // prepare()/next(). Snaps up to whole Opus frames and clamps to capacity.
+    void setTargetMs(uint32_t ms) {
+        ms = std::max(kOpusFrameDurationMs, std::min(maxTargetMs, ms));
+        const auto frames = (ms + kOpusFrameDurationMs - 1) / kOpusFrameDurationMs;
+        target_.store(frames * uint32_t(kOpusFrameSamples) * uint32_t(Channels),
+                      std::memory_order_relaxed);
+    }
     void reset() {
         queue.clear();
         primed_ = false;
@@ -121,26 +134,28 @@ public:
         fade_ = 0;
     }
     void prepare() {
+        const auto tgt = target_.load(std::memory_order_relaxed);
+        const auto high = tgt + uint32_t(kSampleRate) / 1000 * 150 * uint32_t(Channels);
         const auto size = queue.size();
         const auto overflowCount = overflows.load(std::memory_order_relaxed);
-        if (size > target &&
-            (size > highWater || overflowCount != handledOverflows_)) {
+        if (size > tgt &&
+            (size > high || overflowCount != handledOverflows_)) {
             // Only the consumer trims; retain a priming buffer after producer overflow.
-            const auto discard = (size - target) / Channels * Channels;
+            const auto discard = (size - tgt) / Channels * Channels;
             queue.discard(discard);
             primed_ = false;
         }
         handledOverflows_ = overflowCount;
         const float correction = std::max(-maxRateCorrection,
             std::min(maxRateCorrection,
-                (float(queue.size()) - float(target)) * 0.000002f));
+                (float(queue.size()) - float(tgt)) * 0.000002f));
         const float desired = nominalRatio_ * (1.0f + correction);
         ratio_ += (desired - ratio_) * 0.02f;
     }
     // Writes Channels interleaved floats (out[0] = L, out[1] = R when stereo).
     void next(float* out) {
         if (!primed_) {
-            if (queue.size() < target) {
+            if (queue.size() < target_.load(std::memory_order_relaxed)) {
                 for (int ch = 0; ch < Channels; ++ch) {
                     previous_[ch] = std::abs(previous_[ch]) < 0.000001f
                         ? 0.0f : previous_[ch] * 0.98f;
@@ -178,6 +193,8 @@ public:
         for (int ch = 0; ch < Channels; ++ch) previous_[ch] = out[ch];
     }
 private:
+    // Live target in interleaved samples; setTargetMs() stores, consumer loads.
+    std::atomic<uint32_t> target_{target};
     bool primed_ = false;
     int16_t a_[Channels] = {}, b_[Channels] = {};
     float phase_ = 0, nominalRatio_ = 1, ratio_ = 1;

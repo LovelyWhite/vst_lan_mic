@@ -2,11 +2,14 @@
 
 #include <WiFi.h>
 #include <Preferences.h>
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <strings.h>
 
+#include "AudioTasks.h"
 #include "DeviceIdentity.h"
 #include "Protocol.h"
 #include "Serial.h"
@@ -16,6 +19,7 @@ namespace lanmic {
 
 char deviceName[33]{};
 bool enableEpIn = true, enableEpOut = true;
+uint32_t playoutTargetMs = sos::StereoPlayout::targetMs;
 
 namespace {
 
@@ -25,6 +29,7 @@ constexpr char kNvsNamespace[] = "lanmic";
 constexpr char kKeyName[] = "prov_ssid";
 constexpr char kKeyEpIn[] = "ep_in";
 constexpr char kKeyEpOut[] = "ep_out";
+constexpr char kKeyBufMs[] = "buf_ms";
 constexpr size_t kLineMax = 64;
 
 bool parseSwitch(const char* text, bool& value) {
@@ -40,6 +45,18 @@ bool parseSwitch(const char* text, bool& value) {
         return true;
     }
     return false;
+}
+
+// Whole milliseconds within the playout's capacity; surrounding spaces are ok.
+bool parseBufMs(const char* text, uint32_t& value) {
+    if (!text || !*text) return false;
+    char* end = nullptr;
+    const long ms = strtol(text, &end, 10);
+    while (*end == ' ') ++end;
+    if (end == text || *end || ms < long(sos::kOpusFrameDurationMs) ||
+        ms > long(sos::StereoPlayout::maxTargetMs)) return false;
+    value = uint32_t(ms);
+    return true;
 }
 
 // Field bodies: the | separator and backslash are backslash-escaped,
@@ -92,7 +109,7 @@ struct Reply {
 // text; build it with Reply if the commands ever become data.
 void printHelp(Print& out) {
     Reply r{out, "OK", "help"};
-    r.field("help,info,name,epin,epout,erase,reboot");
+    r.field("help,info,name,epin,epout,buf,erase,reboot");
     r.close();
 }
 
@@ -118,6 +135,7 @@ void printInfo(Print& out, const char* cmd) {
     r.field(deviceName);
     r.boolean(enableEpIn);
     r.boolean(enableEpOut);
+    r.num(playoutTargetMs);
     r.close();
 }
 
@@ -178,6 +196,32 @@ void handleLine(Print& out, char* line, Preferences& prefs) {
         r.boolean(value);
         r.close();
         out.flush(); // the reply must reach the host before the detach below
+    } else if (!strcasecmp(line, "buf")) {
+        uint32_t ms = 0;
+        if (!argument || !*argument) {
+            Reply r{out, "OK", line};
+            r.num(playoutTargetMs);
+            r.close();
+            return;
+        }
+        if (!parseBufMs(argument, ms)) {
+            char reason[48];
+            snprintf(reason, sizeof(reason), "buf needs %u-%u ms",
+                     unsigned(sos::kOpusFrameDurationMs),
+                     unsigned(sos::StereoPlayout::maxTargetMs));
+            replyError(out, line, reason);
+            return;
+        }
+        if (!prefs.putUInt(kKeyBufMs, ms)) {
+            replyError(out, line, "NVS write failed");
+            return;
+        }
+        playoutTargetMs = ms;
+        // Atomic store only; the audio consumer applies it on its next pass.
+        audioQueues->microphone.setTargetMs(ms);
+        Reply r{out, "OK", line};
+        r.num(ms);
+        r.close();
     } else if (!strcasecmp(line, "erase")) {
         // Saved Wi-Fi credentials only; the device name and the USB
         // endpoint switches keep their NVS values. Like the BOOT-button reset in
@@ -247,6 +291,19 @@ void selfCheck() {
     assert(!parseSwitch("2", value));
     assert(!parseSwitch("", value));
     assert(!parseSwitch(nullptr, value));
+    uint32_t ms = 0;
+    assert(parseBufMs("80", ms) && ms == 80);
+    assert(parseBufMs(" 100 ", ms) && ms == 100);
+    assert(!parseBufMs("19", ms));
+    assert(!parseBufMs("abc", ms));
+    assert(!parseBufMs("80x", ms));
+    assert(!parseBufMs("", ms));
+    assert(!parseBufMs(nullptr, ms));
+    char edge[16];
+    snprintf(edge, sizeof(edge), "%u", unsigned(sos::StereoPlayout::maxTargetMs));
+    assert(parseBufMs(edge, ms) && ms == sos::StereoPlayout::maxTargetMs);
+    snprintf(edge, sizeof(edge), "%u", unsigned(sos::StereoPlayout::maxTargetMs + 1));
+    assert(!parseBufMs(edge, ms));
     char esc[4];
     assert(pipeEscapeChar(esc, '|') == 2 && memcmp(esc, "\\|", 2) == 0);
     assert(pipeEscapeChar(esc, '\\') == 2 && memcmp(esc, "\\\\", 2) == 0);
@@ -259,13 +316,19 @@ void selfCheck() {
 void loadDeviceConfig() {
     deviceName[0] = '\0';
     enableEpIn = enableEpOut = true;
+    playoutTargetMs = sos::StereoPlayout::targetMs;
     Preferences prefs;
     if (prefs.begin(kNvsNamespace, true)) {
         prefs.getString(kKeyName, deviceName, sizeof(deviceName));
         enableEpIn = prefs.getBool(kKeyEpIn, true);
         enableEpOut = prefs.getBool(kKeyEpOut, true);
+        playoutTargetMs = prefs.getUInt(kKeyBufMs, sos::StereoPlayout::targetMs);
         prefs.end();
     }
+    // A stale NVS value must not exceed what the queue can hold.
+    playoutTargetMs = std::max(sos::kOpusFrameDurationMs,
+        std::min(sos::StereoPlayout::maxTargetMs, playoutTargetMs));
+    audioQueues->microphone.setTargetMs(playoutTargetMs);
     if (!deviceName[0]) {
         snprintf(deviceName, sizeof(deviceName), "%s", identity);
     }

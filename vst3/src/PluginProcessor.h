@@ -43,6 +43,7 @@ private:
     void resampleSendSample(const float* stereo, uint32_t now);
     std::atomic<float>* gainParam_ = nullptr;
     std::atomic<float>* enabledParam_ = nullptr;
+    std::atomic<float>* bufferMsParam_ = nullptr; // Return only.
     std::atomic<bool> offline_{false};
     std::atomic<uint32_t> dawSampleRateHz_{sos::kSampleRate};
     juce::SmoothedValue<float> gain_;

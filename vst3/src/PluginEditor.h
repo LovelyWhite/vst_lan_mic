@@ -14,13 +14,15 @@ private:
     // child components are being torn down.
     juce::LookAndFeel_V4 skin_;
     BridgeProcessor& processor_;
-    juce::Label title_, direction_, deviceLabel_, gainLabel_, status_;
+    juce::Label title_, direction_, deviceLabel_, gainLabel_, bufferLabel_, status_;
     juce::ComboBox device_;
     juce::Slider gain_;
+    juce::Slider buffer_; // Return only: playout target in ms.
     juce::ToggleButton enabled_{"Network enabled"};
     juce::HyperlinkButton credit_{"@suxitech v" LANMIC_VERSION,
                                   juce::URL{"https://lan-mic.suxitech.cn/"}};
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> gainAttachment_;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> bufferAttachment_;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> enabledAttachment_;
     juce::StringArray deviceIds_;
     juce::StringArray deviceNames_;

@@ -8,6 +8,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout BridgeProcessor::makeParamet
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"gain", 1}, "Network gain (dB)",
         juce::NormalisableRange<float>{-60.0f, 12.0f, 0.1f}, 0.0f));
+    if constexpr (!sending)
+        layout.add(std::make_unique<juce::AudioParameterFloat>(
+            juce::ParameterID{"bufferMs", 1}, "Buffer target (ms)",
+            juce::NormalisableRange<float>{float(sos::kOpusFrameDurationMs),
+                                           float(sos::StereoPlayout::maxTargetMs),
+                                           float(sos::kOpusFrameDurationMs)},
+            float(sos::StereoPlayout::targetMs)));
     return layout;
 }
 
@@ -18,6 +25,7 @@ BridgeProcessor::BridgeProcessor()
       parameters(*this, nullptr, "LAN MIC", makeParameters()) {
     gainParam_ = parameters.getRawParameterValue("gain");
     enabledParam_ = parameters.getRawParameterValue("enabled");
+    if constexpr (!sending) bufferMsParam_ = parameters.getRawParameterValue("bufferMs");
     parameters.addParameterListener("enabled", this);
 }
 
@@ -145,6 +153,7 @@ void BridgeProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
             gain_.skip(buffer.getNumSamples());
         }
     } else {
+        network.setReceiveTargetMs(uint32_t(bufferMsParam_->load()));
         network.prepareReceive();
         if (!active || !network.connected()) {
             network.clearReceive();

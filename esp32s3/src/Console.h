@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <cstddef>
+#include <cstdint>
 
 namespace lanmic {
 
@@ -16,6 +17,8 @@ namespace lanmic {
 // keeps doing the device recognition.
 extern char deviceName[33];
 extern bool enableEpIn, enableEpOut;
+// DAW->phone playout target in ms (NVS "buf_ms"); applied live, no reboot.
+extern uint32_t playoutTargetMs;
 
 void loadDeviceConfig();
 void consoleTask(void*);

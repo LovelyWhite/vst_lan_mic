@@ -21,6 +21,8 @@ public:
         incoming_.setNominalRatio(float(double(sos::kSampleRate) / safeRate));
         incoming_.reset();
     }
+    // Atomic store inside Playout; safe from any thread.
+    void setReceiveTargetMs(uint32_t ms) { incoming_.setTargetMs(ms); }
     void prepareReceive();
     // Writes the next interleaved pair: out[0] = left, out[1] = right.
     void receiveSamples(float* out) { incoming_.next(out); }
