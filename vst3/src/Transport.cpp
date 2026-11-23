@@ -12,10 +12,10 @@ juce::String normalizedDeviceIdentity(const juce::String& value) {
     const int separator = value.lastIndexOfChar('-');
     if (separator < 0) return {};
     auto number = value.substring(separator + 1).toUpperCase();
+    // 6-digit suffixes come from older firmware; keep the suffix as sent.
     if ((number.length() != 6 && number.length() != 12) ||
         !number.containsOnly("0123456789ABCDEF"))
         return {};
-    number = number.substring(number.length() - 6);
     return juce::String(sos::kDeviceName) + "-" + number;
 }
 constexpr uint32_t kMaxPlcFrames = 300 / sos::kOpusFrameDurationMs;

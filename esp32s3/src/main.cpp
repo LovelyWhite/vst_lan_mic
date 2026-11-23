@@ -78,10 +78,7 @@ void setup() {
     audio_tools::AudioToolsLogger.setLogLevel(audio_tools::AudioLogger::Error);
     const uint64_t mac = ESP.getEfuseMac();
     snprintf(usbSerial, sizeof(usbSerial), "%012llX", (unsigned long long)mac);
-    char deviceNumber[7]{};
-    snprintf(deviceNumber, sizeof(deviceNumber), "%06llX",
-             (unsigned long long)(mac & 0xFFFFFFULL));
-    snprintf(identity, sizeof(identity), "%s-%s", sos::kDeviceName, deviceNumber);
+    snprintf(identity, sizeof(identity), "%s-%s", sos::kDeviceName, usbSerial);
     bootSession = esp_random();
     if (!bootSession) bootSession = 1;
     loadDeviceConfig();

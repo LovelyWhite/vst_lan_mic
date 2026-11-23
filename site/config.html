@@ -587,7 +587,7 @@ async function connect() {
 // Skipped while the flasher is up: it re-opens the same port for its console and
 // our write of `port` would race with it. autoBusy keeps two reset-time connect
 // events from opening two grants and orphaning the first handle.
-// Only our own device qualifies: Chrome hands JS the USB ids, never the "LAN MIC-xxxxxx"
+// Only our own device qualifies: Chrome hands JS the USB ids, never the "LAN MIC-xxxxxxxxxxxx"
 // product string the picker shows, so the ids of the composite descriptor main.cpp
 // builds (audio-tools defaults) are the filter. This drops Bluetooth / debug-console
 // grants and the ROM download-mode port (303A:1001).
