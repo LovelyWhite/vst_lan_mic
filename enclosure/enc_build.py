@@ -40,7 +40,8 @@ RV, RH = 2.00, 0.80   # outer corner / outer rim fillet radii (RH < T so the rim
 
 X0, X1 = BX0 - CLEAR, BX1 + GAPX     # cavity plan; +X wall inner face = tail-socket bottom
 Y0, Y1 = BY0 - CLEAR, BY1 + CLEAR
-ZFL = -2.000 - 0.80                  # cavity floor (lowest part -2.00)
+ZFL = BZ0 - 0.82                     # pcb bottom sits 0.82 above the cavity floor; the flare's
+                                     # extra depth lives in the lid relief pocket, not the body
 ZTOP = 2.420 + 0.50                  # cavity ceiling (tallest part = shield can 2.420)
 PLUG_TIP = -10.485
 FLARE_X0 = -2.93                   # flare relief start, just ahead of the flare tip (-2.923)
@@ -63,9 +64,10 @@ GAP = 0.05             # y air per side; z air ~0.045/side from the 2.50 bore on
 # Cased-phone clearance: no added boss (that would shorten plug reach); the end shoulders taper
 # back around a central stadium tongue (same silhouette as the port, uniform ring width).
 # Parting-UP print (bed = Type-C face, grows +X): every outer wall may grow outward at most 45 deg
-# from the print axis. A slim tongue would need >45 deg to reach the full section in the available
-# length, so the ring is thickened to 2.85 and the nose runs all the way to the bond-groove start.
-TONGUE_WALL = 2.85
+# from the print axis, so the nose runs all the way to the bond-groove start. Ring 2.40: thick
+# enough to keep that growth <=45 deg, thin enough that the tongue bottom stays above the thinned
+# shell floor OZ0 (a fatter ring would clip the stadium flat against the bottom face).
+TONGUE_WALL = 2.40
 TONGUE_W = (TUBE_Y[1] - TUBE_Y[0]) + 2 * GAP + 2 * TONGUE_WALL
 TONGUE_H = PH + 2 * TONGUE_WALL
 TCY = (TUBE_Y[0] + TUBE_Y[1]) / 2
@@ -313,7 +315,7 @@ ov, rg = lid.common(body).Volume, rib.cut(groove).Volume
 print("assembly overlap mm3: %.6f | rib outside groove mm3: %.6f" % (ov, rg))
 assert ov < 1e-3 and rg < 1e-3, "halves interfere or rib misses the groove"
 # nose root must stay solid behind the taper end (no through-hole into the flare seat)
-assert lid.isInside(App.Vector(NOSE_END + 0.1, TCY, -2.6), 1e-6, True), "nose root broken"
+assert lid.isInside(App.Vector(NOSE_END + 0.1, TCY, OZ0 + 0.4), 1e-6, True), "nose root broken"
 # no degenerate zero-area sliver faces (the right-view spike bug)
 assert all(f.Area > 1e-6 for f in lid.Faces), "degenerate sliver face on lid"
 # parting-UP support-free: nose outward growth <=45 deg from the +X print axis, and the nose must
@@ -321,10 +323,13 @@ assert all(f.Area > 1e-6 for f in lid.Faces), "degenerate sliver face on lid"
 nose_slope = ((OY1 - OY0) / 2 - TONGUE_W / 2) / (NOSE_END - OX0)
 assert nose_slope <= 1.0, "nose overhang >45 deg (needs support)"
 assert TONGUE_W / 2 + nose_slope * (BX0 - OX0) >= BY1 + 0.84, "nose outer wall <0.84 at board front"
+# the stadium tongue must fit inside the shell section, else its arc clips flat on the end face
+assert OZ0 < AXZ - TONGUE_H / 2 and AXZ + TONGUE_H / 2 < OZ1, "tongue clipped by shell floor/ceiling"
 # parting must stay ahead of the button pinhole so the hole is wholly in the body
 assert PX < WIN["c"][0] - WIN["r"], "parting crosses the button pinhole"
-# slide-in: board + flare sections pass the rim opening; shield can stops before the socket lip
-assert Y0 < BY0 and BY1 < Y1 and ZFL - 0.01 < -2.00 and 1.20 < ZTOP
+# slide-in: shield can passes the rim opening and stops before the socket lip; the flare never
+# crosses the parting (it seats in the lid relief), so the body floor may sit above the flare
+assert Y0 < BY0 and BY1 < Y1 and 0.575 < PX and _fz0 > OZ0 and 1.20 < ZTOP
 assert 21.840 < BX1 - ENG and 0.92 < ZTOP
 print("joint: land %.2f | groove %.2f x %.2f (lid), rib %.2f x %.2f (body), gap %.2f/side"
       % (LAND, GRO_W, GRO_D, RIB_W, RIB_H, FIT))
